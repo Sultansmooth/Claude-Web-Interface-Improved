@@ -2315,6 +2315,14 @@ async function handleChatRequest(c, requestAbortControllers) {
           logger.chat.error("Failed to inject message: {e}", { e });
         }
       };
+      // Heartbeat to keep connection alive during long tool executions
+      let streamDone = false;
+      const heartbeat = setInterval(() => {
+        if (streamDone) return;
+        try {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: "heartbeat", ts: Date.now() }) + "\n"));
+        } catch (e) {}
+      }, 10000);
       try {
         for await (const chunk of executeClaudeCommand(
           chatRequest.message,
@@ -2330,8 +2338,12 @@ async function handleChatRequest(c, requestAbortControllers) {
           const data = JSON.stringify(chunk) + "\n";
           controller.enqueue(new TextEncoder().encode(data));
         }
+        streamDone = true;
+        clearInterval(heartbeat);
         controller.close();
       } catch (error) {
+        streamDone = true;
+        clearInterval(heartbeat);
         const errorResponse = {
           type: "error",
           error: error instanceof Error ? error.message : String(error)
@@ -2407,6 +2419,87 @@ function createApp(runtime2, config) {
     (c) => handleAbortRequest(c, requestAbortControllers)
   );
   app.post("/api/chat", (c) => handleChatRequest(c, requestAbortControllers));
+  // Process tree endpoint - shows child processes with kill capability
+  app.get("/api/processes", async (c) => {
+    try {
+      const pid = process.pid;
+      const isWin = getPlatform() === "windows";
+      if (isWin) {
+        const { execSync: ex } = await import("node:child_process");
+        // Get all processes and build tree from our PID down
+        const raw = ex('wmic process get ProcessId,ParentProcessId,Name,CommandLine /format:csv', {
+          encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        const lines = raw.split('\n').filter(l => l.trim()).slice(1); // skip header
+        const allProcs = [];
+        for (const line of lines) {
+          const cols = line.trim().split(',');
+          if (cols.length >= 5) {
+            // CSV format: Node,CommandLine,Name,ParentProcessId,ProcessId
+            const cmdLine = cols.slice(1, cols.length - 3).join(','); // CommandLine may contain commas
+            allProcs.push({
+              pid: parseInt(cols[cols.length - 1]),
+              ppid: parseInt(cols[cols.length - 2]),
+              name: cols[cols.length - 3],
+              cmd: cmdLine.substring(0, 200)
+            });
+          }
+        }
+        // Find all descendants of our PID
+        function getDescendants(parentPid, depth = 0) {
+          if (depth > 10) return [];
+          const children = allProcs.filter(p => p.ppid === parentPid && p.pid !== parentPid);
+          const result = [];
+          for (const child of children) {
+            result.push({ ...child, depth });
+            result.push(...getDescendants(child.pid, depth + 1));
+          }
+          return result;
+        }
+        const tree = getDescendants(pid);
+        return c.json({ pid, children: tree });
+      } else {
+        // Unix: use ps
+        const { execSync: ex } = await import("node:child_process");
+        const raw = ex(`ps -eo pid,ppid,comm --no-headers`, { encoding: 'utf8', timeout: 5000 }).trim();
+        const allProcs = raw.split('\n').map(l => {
+          const parts = l.trim().split(/\s+/);
+          return { pid: parseInt(parts[0]), ppid: parseInt(parts[1]), name: parts.slice(2).join(' '), cmd: '' };
+        });
+        function getDescendants(parentPid, depth = 0) {
+          if (depth > 10) return [];
+          const children = allProcs.filter(p => p.ppid === parentPid && p.pid !== parentPid);
+          const result = [];
+          for (const child of children) {
+            result.push({ ...child, depth });
+            result.push(...getDescendants(child.pid, depth + 1));
+          }
+          return result;
+        }
+        const tree = getDescendants(process.pid);
+        return c.json({ pid: process.pid, children: tree });
+      }
+    } catch (e) {
+      return c.json({ pid: process.pid, children: [], error: e.message || String(e) });
+    }
+  });
+  app.post("/api/processes/:pid/kill", async (c) => {
+    try {
+      const targetPid = parseInt(c.req.param("pid"));
+      if (!targetPid || targetPid === process.pid) {
+        return c.json({ error: "Cannot kill server process" }, 400);
+      }
+      const { execSync: ex } = await import("node:child_process");
+      if (getPlatform() === "windows") {
+        ex(`taskkill /F /T /PID ${targetPid}`, { stdio: "ignore", timeout: 5000 });
+      } else {
+        process.kill(targetPid, "SIGTERM");
+      }
+      return c.json({ success: true, killed: targetPid });
+    } catch (e) {
+      return c.json({ error: e.message || String(e) }, 500);
+    }
+  });
   // Docs discovery endpoint
   app.get("/api/docs", async (c) => {
     const dir = c.req.query("dir");
@@ -2880,8 +2973,76 @@ async function main(runtime2) {
   runtime2.serve(args.port, args.host, app.fetch);
 }
 var runtime = new NodeRuntime();
+
+// Process cleanup: PID file + Windows Job Object
+import { execSync, spawnSync } from "node:child_process";
+import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+var PID_FILE = join(homedir(), ".claude", "webui.pid");
+
+function writePidFile() {
+  try {
+    mkdirSync(join(homedir(), ".claude"), { recursive: true });
+    writeFileSync(PID_FILE, String(process.pid), "utf8");
+  } catch (e) {}
+}
+function removePidFile() {
+  try { unlinkSync(PID_FILE); } catch (e) {}
+}
+
+// Windows Job Object: ensures ALL child processes die when this process exits
+// (even on hard close / X button). The Job Object is tied to this process's lifetime.
+function setupWindowsJobObject() {
+  if (getPlatform() !== "windows") return;
+  try {
+    const pid = process.pid;
+    // PowerShell creates a Job Object with KILL_ON_JOB_CLOSE and assigns this process to it.
+    // The Job Object handle is held by the PowerShell process which waits for us to exit.
+    // When we die (any reason), PS exits, handle closes, Windows kills all children.
+    const ps1 = `
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class JO {
+  [DllImport("kernel32.dll")] public static extern IntPtr CreateJobObject(IntPtr a, string n);
+  [DllImport("kernel32.dll")] public static extern bool SetInformationJobObject(IntPtr h, int c, ref JELI i, int s);
+  [DllImport("kernel32.dll")] public static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p);
+  [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int a, bool b, int pid);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct JBLI { public long a,b; public int LimitFlags; public UIntPtr c,d; public int e; public long f; public int g,h; }
+  [StructLayout(LayoutKind.Sequential)] public struct IOC { public ulong a,b,c,d,e,f; }
+  [StructLayout(LayoutKind.Sequential)] public struct JELI { public JBLI Basic; public IOC Io; public UIntPtr a,b,c,d; }
+}
+'@
+$j = [JO]::CreateJobObject([IntPtr]::Zero, $null)
+$i = New-Object JO+JELI; $i.Basic.LimitFlags = 0x2000
+[JO]::SetInformationJobObject($j, 9, [ref]$i, [Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+$h = [JO]::OpenProcess(0x1F0FFF, $false, ${pid})
+[JO]::AssignProcessToJobObject($j, $h) | Out-Null
+[JO]::CloseHandle($h) | Out-Null
+# Hold the job handle alive until the node process exits
+try { (Get-Process -Id ${pid}).WaitForExit() } catch {}
+`;
+    // Fire-and-forget: PS holds the Job Object handle in the background
+    const child = spawn("powershell", ["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", ps1], {
+      detached: true,
+      stdio: "ignore"
+    });
+    child.unref();
+    console.log(`[JobObject] Process protection active (PID ${pid})`);
+  } catch (e) {
+    console.log(`[JobObject] Warning: could not set up process protection: ${e.message || e}`);
+  }
+}
+
+writePidFile();
+setupWindowsJobObject();
+
+process.on("SIGINT", () => { removePidFile(); process.exit(0); });
+process.on("SIGTERM", () => { removePidFile(); process.exit(0); });
+process.on("exit", removePidFile);
+
 main(runtime).catch((error) => {
   console.error("Failed to start server:", error);
+  removePidFile();
   exit(1);
 });
 //# sourceMappingURL=node.js.map

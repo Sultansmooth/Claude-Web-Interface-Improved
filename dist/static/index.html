@@ -1978,7 +1978,15 @@
     <script>
       (function() {
         var SESSION_KEY = 'claude-webui-tab-session-' + window.location.pathname;
+        var TAB_IDENTITY_KEY = 'claude-webui-tab-identity';
         var restoreSessionId = null;
+
+        // Detect new tab vs refresh: sessionStorage persists across refreshes
+        // but is empty in brand-new tabs. Only offer restore on refresh.
+        var isNewTab = !sessionStorage.getItem(TAB_IDENTITY_KEY);
+        if (isNewTab) {
+          sessionStorage.setItem(TAB_IDENTITY_KEY, Date.now().toString());
+        }
 
         function getSavedSession() {
           try { return JSON.parse(localStorage.getItem(SESSION_KEY)); }
@@ -2046,8 +2054,9 @@
           return _origFetch.apply(this, args);
         };
 
-        // Show restore banner on load
+        // Show restore banner on load (only on refresh, not new tabs)
         function showRestoreBanner() {
+          if (isNewTab) return; // New tab = new project, don't offer restore
           var saved = getSavedSession();
           if (!saved || !saved.sessionId) return;
           if (Date.now() - saved.timestamp > 24 * 60 * 60 * 1000) return;
@@ -2132,6 +2141,634 @@
       })();
     </script>
 
+    <!-- Thinking progress indicator -->
+    <script>
+      (function() {
+        var thinkingStartTime = null;
+        var thinkingTimer = null;
+        var streamBytes = 0;
+        var streamTokens = 0;
+        var lastChunkTime = null;
+        var lastHeartbeat = null;
+        var activeTool = null;
+        var overlayEl = null;
+        var thinkingTokens = 0;
+
+        function formatElapsed(ms) {
+          var secs = Math.floor(ms / 1000);
+          if (secs < 60) return secs + 's';
+          var mins = Math.floor(secs / 60);
+          secs = secs % 60;
+          return mins + 'm ' + (secs < 10 ? '0' : '') + secs + 's';
+        }
+
+        function formatTokens(n) {
+          if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+          return String(n);
+        }
+
+        function createOverlay() {
+          if (overlayEl) return;
+          overlayEl = document.createElement('div');
+          overlayEl.id = 'thinking-progress';
+          var dark = document.documentElement.classList.contains('dark');
+          overlayEl.style.cssText = 'font-family:ui-monospace,monospace;font-size:11px;padding:3px 8px;border-radius:6px;display:inline-flex;align-items:center;gap:8px;margin-top:2px;flex-wrap:wrap;max-width:400px;' +
+            (dark ? 'color:#94a3b8;background:rgba(30,41,59,0.7);' : 'color:#64748b;background:rgba(241,245,249,0.8);');
+          overlayEl.innerHTML =
+            '<span class="elapsed">0s</span>' +
+            '<span class="dot" style="width:4px;height:4px;border-radius:50%;background:currentColor;opacity:0.5;animation:tpulse 1.5s infinite;"></span>' +
+            '<span class="tokens" style="opacity:0.7;"></span>' +
+            '<span class="tool-info" style="opacity:0.7;font-size:10px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>';
+          if (!document.getElementById('thinking-progress-style')) {
+            var style = document.createElement('style');
+            style.id = 'thinking-progress-style';
+            style.textContent = '@keyframes tpulse{0%,100%{opacity:0.3}50%{opacity:1}}';
+            document.head.appendChild(style);
+          }
+        }
+
+        function updateOverlay() {
+          if (!overlayEl || !thinkingStartTime) return;
+          var elapsed = Date.now() - thinkingStartTime;
+          var elSpan = overlayEl.querySelector('.elapsed');
+          var tokSpan = overlayEl.querySelector('.tokens');
+          var toolSpan = overlayEl.querySelector('.tool-info');
+          if (elSpan) elSpan.textContent = formatElapsed(elapsed);
+          if (tokSpan) {
+            var parts = [];
+            if (streamTokens > 0) parts.push('\u2193 ' + formatTokens(streamTokens) + ' tokens');
+            if (thinkingTokens > 0) parts.push('thought ' + formatTokens(thinkingTokens));
+            tokSpan.textContent = parts.join(' \u00B7 ');
+          }
+          if (toolSpan) toolSpan.textContent = activeTool ? '\u25B8 ' + activeTool : '';
+        }
+
+        function attachOverlay() {
+          var spans = document.querySelectorAll('span.animate-pulse');
+          for (var i = 0; i < spans.length; i++) {
+            if (spans[i].textContent === 'Thinking...') {
+              var parent = spans[i].parentElement;
+              if (parent && !parent.querySelector('#thinking-progress')) {
+                createOverlay();
+                parent.appendChild(overlayEl);
+              }
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function startThinking() {
+          if (thinkingStartTime) return;
+          thinkingStartTime = Date.now();
+          streamBytes = 0;
+          streamTokens = 0;
+          thinkingTokens = 0;
+          lastChunkTime = null;
+          activeTool = null;
+          thinkingTimer = setInterval(function() {
+            if (!attachOverlay()) {
+              stopThinking();
+              return;
+            }
+            updateOverlay();
+          }, 500);
+        }
+
+        function stopThinking() {
+          thinkingStartTime = null;
+          streamBytes = 0;
+          streamTokens = 0;
+          thinkingTokens = 0;
+          activeTool = null;
+          lastHeartbeat = null;
+          if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+          if (overlayEl && overlayEl.parentNode) { overlayEl.remove(); }
+          overlayEl = null;
+        }
+
+        var thinkingObserver = new MutationObserver(function() {
+          var found = document.querySelector('span.animate-pulse');
+          if (found && found.textContent === 'Thinking...') {
+            startThinking();
+          } else if (thinkingStartTime) {
+            stopThinking();
+          }
+        });
+        window.addEventListener('load', function() {
+          thinkingObserver.observe(document.body, { childList: true, subtree: true });
+        });
+
+        window.__thinkingProgress = {
+          onChunk: function(byteLen) {
+            if (thinkingStartTime) {
+              streamBytes += (byteLen || 0);
+              lastChunkTime = Date.now();
+            }
+          },
+          onHeartbeat: function() {
+            lastHeartbeat = Date.now();
+          },
+          onToolUse: function(toolLabel) {
+            activeTool = toolLabel;
+          },
+          onTokens: function(inputTokens, outputTokens) {
+            // From SDK usage data
+            if (inputTokens) streamTokens = inputTokens;
+            if (outputTokens && outputTokens > streamTokens) streamTokens = outputTokens;
+          },
+          addStreamTokens: function(count) {
+            streamTokens += count;
+          },
+          addThinkingTokens: function(count) {
+            thinkingTokens += count;
+          }
+        };
+      })();
+    </script>
+
+    <!-- Message Queue (type while processing) -->
+    <script>
+      (function() {
+        var messageQueue = [];
+        var isProcessing = false;
+        var queueBadge = null;
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        // Keep textarea enabled even when React disables it
+        var textareaObserver = new MutationObserver(function(mutations) {
+          for (var i = 0; i < mutations.length; i++) {
+            var m = mutations[i];
+            if (m.type === 'attributes' && m.attributeName === 'disabled') {
+              var ta = m.target;
+              if (ta.tagName === 'TEXTAREA' && ta.disabled) {
+                isProcessing = true;
+                ta.disabled = false;
+                ta.placeholder = messageQueue.length > 0
+                  ? 'Queued: ' + messageQueue.length + ' message(s)... type another or press Enter'
+                  : 'Type to queue a message...';
+              }
+            }
+          }
+        });
+
+        // Also watch for new textareas being added (React re-renders)
+        var bodyObserver = new MutationObserver(function() {
+          var textareas = document.querySelectorAll('textarea[disabled]');
+          for (var i = 0; i < textareas.length; i++) {
+            var ta = textareas[i];
+            // Only target the chat input textarea (has the specific classes)
+            if (ta.className.indexOf('rounded-xl') !== -1) {
+              isProcessing = true;
+              ta.disabled = false;
+              ta.placeholder = messageQueue.length > 0
+                ? 'Queued: ' + messageQueue.length + ' message(s)... type another or press Enter'
+                : 'Type to queue a message...';
+              // Observe attribute changes on this textarea
+              textareaObserver.observe(ta, { attributes: true, attributeFilter: ['disabled'] });
+            }
+          }
+        });
+
+        window.addEventListener('load', function() {
+          bodyObserver.observe(document.body, { childList: true, subtree: true });
+        });
+
+        function escapeHtml(s) {
+          var d = document.createElement('div');
+          d.textContent = s;
+          return d.innerHTML;
+        }
+
+        function truncate(s, len) {
+          return s.length > len ? s.substring(0, len) + '...' : s;
+        }
+
+        function updateQueueBadge() {
+          if (messageQueue.length === 0) {
+            if (queueBadge) { queueBadge.remove(); queueBadge = null; }
+            return;
+          }
+          if (!queueBadge) {
+            queueBadge = document.createElement('div');
+            queueBadge.id = 'msg-queue-badge';
+            document.body.appendChild(queueBadge);
+          }
+          var dark = isDark();
+          queueBadge.style.cssText = 'position:fixed;bottom:62px;right:20px;z-index:100000;padding:6px 12px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:11px;font-weight:500;max-width:340px;' +
+            (dark ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;' : 'background:#eff6ff;color:#1d4ed8;border:1px solid #93c5fd;');
+
+          var html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:' + (messageQueue.length > 0 ? '6' : '0') + 'px;">';
+          html += '<span style="font-size:13px;">\uD83D\uDCE8</span> <span style="font-weight:600;">' + messageQueue.length + ' queued</span>';
+          html += '</div>';
+
+          for (var i = 0; i < messageQueue.length; i++) {
+            var msg = messageQueue[i];
+            var num = i + 1;
+            html += '<div style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;' + (i > 0 ? 'border-top:1px solid ' + (dark ? 'rgba(59,130,246,0.2)' : 'rgba(29,78,216,0.1)') + ';' : '') + '">';
+            html += '<span style="flex-shrink:0;font-size:10px;opacity:0.5;margin-top:1px;">' + num + '.</span>';
+            html += '<span style="font-family:ui-monospace,monospace;font-size:10px;opacity:0.8;line-height:1.4;word-break:break-word;">' + escapeHtml(truncate(msg, 80)) + '</span>';
+            html += '</div>';
+          }
+
+          queueBadge.innerHTML = html;
+        }
+
+        // Intercept Enter key on textarea during processing to queue
+        document.addEventListener('keydown', function(e) {
+          if (e.key !== 'Enter' || e.shiftKey) return;
+          if (!isProcessing) return;
+
+          var ta = document.querySelector('textarea.rounded-xl') ||
+                   document.querySelector('textarea');
+          if (!ta || document.activeElement !== ta) return;
+          var val = ta.value.trim();
+          if (!val) return;
+
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+
+          messageQueue.push(val);
+          ta.value = '';
+          // Fire input event so React updates its state
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.placeholder = 'Queued: ' + messageQueue.length + ' message(s)... type another or press Enter';
+          updateQueueBadge();
+          console.log('[MsgQueue] Queued message:', val, 'Total:', messageQueue.length);
+        }, true); // capture phase to beat React
+
+        // When processing ends, send queued messages
+        function onProcessingDone() {
+          isProcessing = false;
+          if (messageQueue.length === 0) return;
+
+          // Small delay for React to reset its state
+          setTimeout(function() {
+            var nextMsg = messageQueue.shift();
+            updateQueueBadge();
+            if (!nextMsg) return;
+
+            console.log('[MsgQueue] Sending queued message:', nextMsg);
+
+            // Set the textarea value and trigger React's submit
+            var ta = document.querySelector('textarea.rounded-xl') ||
+                     document.querySelector('textarea');
+            if (ta) {
+              // Set value through native setter to trigger React's onChange
+              var nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype, 'value'
+              ).set;
+              nativeSetter.call(ta, nextMsg);
+              ta.dispatchEvent(new Event('input', { bubbles: true }));
+
+              // Submit the form
+              setTimeout(function() {
+                var form = ta.closest('form');
+                if (form) {
+                  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                }
+              }, 100);
+            }
+          }, 500);
+        }
+
+        // Expose for stream interceptor
+        window.__messageQueue = {
+          onStreamDone: onProcessingDone
+        };
+      })();
+    </script>
+
+    <!-- Floating Todo Panel -->
+    <script>
+      (function() {
+        var panelEl = null;
+        var currentTodos = [];
+        var panelCollapsed = false;
+        var POS_KEY = 'claude-webui-todo-pos';
+        var isDragging = false;
+        var dragOffset = { x: 0, y: 0 };
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function getPos() {
+          try { return JSON.parse(localStorage.getItem(POS_KEY)) || { top: 380, left: 12 }; }
+          catch { return { top: 380, left: 12 }; }
+        }
+        function savePos(top, left) {
+          localStorage.setItem(POS_KEY, JSON.stringify({ top: top, left: left }));
+        }
+
+        var statusIcons = {
+          'pending': '\u23F3',       // hourglass
+          'in_progress': '\uD83D\uDD04', // cycle
+          'completed': '\u2705'      // check
+        };
+
+        function createPanel() {
+          if (panelEl) return;
+          var dark = isDark();
+          var pos = getPos();
+          panelEl = document.createElement('div');
+          panelEl.id = 'todo-float-panel';
+          panelEl.style.cssText = 'position:fixed;top:' + pos.top + 'px;left:' + pos.left + 'px;z-index:99999;width:260px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15);' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;');
+          document.body.appendChild(panelEl);
+          renderPanel();
+        }
+
+        function renderPanel() {
+          if (!panelEl) return;
+          var dark = isDark();
+          var completed = currentTodos.filter(function(t) { return t.status === 'completed'; }).length;
+          var total = currentTodos.length;
+          var pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+          var html = '<div style="padding:8px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';cursor:grab;user-select:none;" id="todo-panel-header">';
+          html += '<span style="font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px;pointer-events:none;">\uD83D\uDCCB Tasks <span style="font-weight:400;opacity:0.6;">' + completed + '/' + total + '</span></span>';
+          html += '<span style="font-size:10px;opacity:0.5;pointer-events:none;">' + (panelCollapsed ? '\u25B6' : '\u25BC') + '</span>';
+          html += '</div>';
+
+          if (!panelCollapsed) {
+            // Progress bar
+            html += '<div style="padding:4px 12px 6px;">';
+            html += '<div style="height:3px;border-radius:2px;overflow:hidden;' + (dark ? 'background:#334155;' : 'background:#e2e8f0;') + '">';
+            html += '<div style="height:100%;border-radius:2px;transition:width 0.4s;background:#22c55e;width:' + pct + '%;"></div>';
+            html += '</div></div>';
+
+            // Todo items
+            html += '<div style="padding:0 12px 8px;max-height:300px;overflow-y:auto;">';
+            for (var i = 0; i < currentTodos.length; i++) {
+              var t = currentTodos[i];
+              var icon = statusIcons[t.status] || '\u2B55';
+              var textStyle = t.status === 'completed' ? 'text-decoration:line-through;opacity:0.5;' : '';
+              var activeStyle = t.status === 'in_progress' ? 'font-weight:500;' : '';
+
+              html += '<div style="display:flex;align-items:flex-start;gap:6px;padding:4px 0;' + activeStyle + '">';
+              html += '<span style="flex-shrink:0;font-size:11px;margin-top:1px;">' + icon + '</span>';
+              html += '<div style="flex:1;min-width:0;">';
+              html += '<div style="' + textStyle + 'line-height:1.4;">' + escapeHtml(t.content || '') + '</div>';
+              if (t.status === 'in_progress' && t.activeForm) {
+                html += '<div style="font-size:10px;font-style:italic;opacity:0.6;margin-top:1px;">' + escapeHtml(t.activeForm) + '</div>';
+              }
+              html += '</div></div>';
+            }
+            html += '</div>';
+          }
+
+          panelEl.innerHTML = html;
+
+          // Drag + collapse on header
+          var header = panelEl.querySelector('#todo-panel-header');
+          if (header) {
+            header.addEventListener('mousedown', function(e) {
+              isDragging = true;
+              dragOffset.x = e.clientX - panelEl.offsetLeft;
+              dragOffset.y = e.clientY - panelEl.offsetTop;
+              dragOffset.startX = e.clientX;
+              dragOffset.startY = e.clientY;
+              header.style.cursor = 'grabbing';
+              e.preventDefault();
+            });
+          }
+        }
+
+        // Global drag handlers
+        document.addEventListener('mousemove', function(e) {
+          if (!isDragging || !panelEl) return;
+          var newLeft = e.clientX - dragOffset.x;
+          var newTop = e.clientY - dragOffset.y;
+          newLeft = Math.max(0, Math.min(window.innerWidth - 100, newLeft));
+          newTop = Math.max(0, Math.min(window.innerHeight - 40, newTop));
+          panelEl.style.left = newLeft + 'px';
+          panelEl.style.top = newTop + 'px';
+        });
+        document.addEventListener('mouseup', function(e) {
+          if (!isDragging || !panelEl) return;
+          isDragging = false;
+          var header = panelEl.querySelector('#todo-panel-header');
+          if (header) header.style.cursor = 'grab';
+          savePos(parseInt(panelEl.style.top), parseInt(panelEl.style.left));
+          // If mouse barely moved, treat as click (toggle collapse)
+          var dx = Math.abs(e.clientX - dragOffset.startX);
+          var dy = Math.abs(e.clientY - dragOffset.startY);
+          if (dx < 5 && dy < 5) {
+            panelCollapsed = !panelCollapsed;
+            renderPanel();
+          }
+        });
+
+        function escapeHtml(s) {
+          var div = document.createElement('div');
+          div.textContent = s;
+          return div.innerHTML;
+        }
+
+        function updateTodos(todos) {
+          if (!todos || !Array.isArray(todos) || todos.length === 0) return;
+          currentTodos = todos;
+          createPanel();
+          renderPanel();
+        }
+
+        function removePanel() {
+          if (panelEl) { panelEl.remove(); panelEl = null; }
+          currentTodos = [];
+        }
+
+        // Expose for stream interceptor
+        window.__todoPanel = {
+          update: updateTodos,
+          remove: removePanel
+        };
+      })();
+    </script>
+
+    <!-- Process Manager Panel -->
+    <script>
+      (function() {
+        var panelEl = null;
+        var collapsed = true;
+        var pollTimer = null;
+        var lastData = null;
+        var toggleBtn = null;
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function escapeHtml(s) {
+          var div = document.createElement('div');
+          div.textContent = s;
+          return div.innerHTML;
+        }
+
+        function shortenCmd(cmd) {
+          if (!cmd) return '';
+          // Remove common prefixes, keep meaningful part
+          cmd = cmd.replace(/^"?[A-Z]:\\.*?\\(node|dotnet|claude|git|python|npm|bash)\.exe"?\s*/i, '');
+          cmd = cmd.replace(/^(cmd\.exe\s+\/[cC]\s+)/i, '');
+          if (cmd.length > 60) cmd = cmd.substring(0, 57) + '...';
+          return cmd;
+        }
+
+        function createToggleButton() {
+          if (toggleBtn) return;
+          toggleBtn = document.createElement('button');
+          toggleBtn.id = 'proc-toggle-btn';
+          var dark = isDark();
+          toggleBtn.style.cssText = 'position:fixed;bottom:12px;left:12px;z-index:99998;width:32px;height:32px;border-radius:8px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;transition:all 0.2s;opacity:0.6;' +
+            (dark ? 'background:#1e293b;color:#94a3b8;border:1px solid #334155;' : 'background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;');
+          toggleBtn.textContent = '\u2699'; // gear icon
+          toggleBtn.title = 'Process Manager';
+          toggleBtn.onmouseenter = function() { toggleBtn.style.opacity = '1'; };
+          toggleBtn.onmouseleave = function() { toggleBtn.style.opacity = '0.6'; };
+          toggleBtn.onclick = function() {
+            collapsed = !collapsed;
+            if (collapsed) {
+              if (panelEl) { panelEl.style.display = 'none'; }
+              stopPolling();
+            } else {
+              createPanel();
+              panelEl.style.display = '';
+              fetchProcesses();
+              startPolling();
+            }
+          };
+          document.body.appendChild(toggleBtn);
+        }
+
+        function createPanel() {
+          if (panelEl) return;
+          var dark = isDark();
+          panelEl = document.createElement('div');
+          panelEl.id = 'proc-manager-panel';
+          panelEl.style.cssText = 'position:fixed;bottom:50px;left:12px;z-index:99998;width:320px;max-height:400px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,0.18);overflow:hidden;display:none;' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;');
+          document.body.appendChild(panelEl);
+        }
+
+        function renderPanel(data) {
+          if (!panelEl) return;
+          var dark = isDark();
+          var children = (data && data.children) || [];
+          // Filter out powershell/conhost noise
+          children = children.filter(function(p) {
+            var n = (p.name || '').toLowerCase();
+            return n !== 'conhost.exe' && n !== 'powershell.exe' && n !== 'cmd.exe';
+          });
+
+          var html = '<div style="padding:8px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';">';
+          html += '<span style="font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px;">\u2699 Processes <span style="font-weight:400;opacity:0.5;font-size:11px;">' + children.length + '</span></span>';
+          html += '<span style="font-size:10px;opacity:0.4;">PID ' + (data ? data.pid : '?') + '</span>';
+          html += '</div>';
+
+          if (children.length === 0) {
+            html += '<div style="padding:16px 12px;text-align:center;opacity:0.5;font-size:11px;">No child processes running</div>';
+          } else {
+            html += '<div style="max-height:320px;overflow-y:auto;">';
+            for (var i = 0; i < children.length; i++) {
+              var p = children[i];
+              var indent = (p.depth || 0) * 12;
+              var isNode = (p.name || '').toLowerCase().indexOf('node') !== -1;
+              var nameBg = isNode
+                ? (dark ? 'background:#1e3a5f;color:#93c5fd;' : 'background:#eff6ff;color:#1d4ed8;')
+                : (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#f1f5f9;color:#475569;');
+
+              html += '<div style="padding:5px 10px 5px ' + (10 + indent) + 'px;display:flex;align-items:center;gap:8px;border-bottom:1px solid ' + (dark ? '#1e293b' : '#f8fafc') + ';">';
+              // Process info
+              html += '<div style="flex:1;min-width:0;">';
+              html += '<div style="display:flex;align-items:center;gap:6px;">';
+              html += '<span style="font-weight:500;font-size:11px;padding:1px 5px;border-radius:3px;' + nameBg + '">' + escapeHtml(p.name || '?') + '</span>';
+              html += '<span style="font-size:10px;opacity:0.4;font-family:ui-monospace,monospace;">' + p.pid + '</span>';
+              html += '</div>';
+              var cmd = shortenCmd(p.cmd);
+              if (cmd) {
+                html += '<div style="font-size:10px;opacity:0.5;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace;">' + escapeHtml(cmd) + '</div>';
+              }
+              html += '</div>';
+              // Kill button
+              html += '<button onclick="window.__procManager.kill(' + p.pid + ')" style="flex-shrink:0;padding:2px 8px;border-radius:4px;border:none;cursor:pointer;font-size:10px;font-weight:600;transition:all 0.15s;' +
+                (dark ? 'background:#7f1d1d;color:#fca5a5;' : 'background:#fef2f2;color:#dc2626;') + '" onmouseenter="this.style.opacity=\'0.8\'" onmouseleave="this.style.opacity=\'1\'">\u2715 Kill</button>';
+              html += '</div>';
+            }
+            html += '</div>';
+          }
+
+          // Kill all button
+          if (children.length > 1) {
+            html += '<div style="padding:6px 10px;border-top:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';text-align:right;">';
+            html += '<button onclick="window.__procManager.killAll()" style="padding:3px 10px;border-radius:5px;border:none;cursor:pointer;font-size:10px;font-weight:600;' +
+              (dark ? 'background:#7f1d1d;color:#fca5a5;' : 'background:#fef2f2;color:#dc2626;') + '">Kill All Children</button>';
+            html += '</div>';
+          }
+
+          panelEl.innerHTML = html;
+        }
+
+        function fetchProcesses() {
+          fetch('/api/processes')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              lastData = data;
+              renderPanel(data);
+              // Update toggle button badge
+              var children = (data.children || []).filter(function(p) {
+                var n = (p.name || '').toLowerCase();
+                return n !== 'conhost.exe' && n !== 'powershell.exe' && n !== 'cmd.exe';
+              });
+              if (toggleBtn) {
+                toggleBtn.textContent = children.length > 0 ? '\u2699' + children.length : '\u2699';
+              }
+            })
+            .catch(function() {});
+        }
+
+        function startPolling() {
+          stopPolling();
+          pollTimer = setInterval(fetchProcesses, 3000);
+        }
+        function stopPolling() {
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+
+        function killProcess(pid) {
+          fetch('/api/processes/' + pid + '/kill', { method: 'POST' })
+            .then(function() { setTimeout(fetchProcesses, 500); })
+            .catch(function() {});
+        }
+
+        function killAll() {
+          if (!lastData || !lastData.children) return;
+          var children = lastData.children.filter(function(p) {
+            var n = (p.name || '').toLowerCase();
+            return n !== 'conhost.exe' && n !== 'powershell.exe' && n !== 'cmd.exe';
+          });
+          // Kill top-level children (tree kill will get the rest)
+          var topLevel = children.filter(function(p) { return (p.depth || 0) === 0; });
+          for (var i = 0; i < topLevel.length; i++) {
+            fetch('/api/processes/' + topLevel[i].pid + '/kill', { method: 'POST' }).catch(function() {});
+          }
+          setTimeout(fetchProcesses, 1000);
+        }
+
+        // Init
+        window.addEventListener('load', function() {
+          createToggleButton();
+          createPanel();
+          // Do an initial fetch to set badge count
+          fetchProcesses();
+          // Light background poll for badge count even when collapsed
+          setInterval(fetchProcesses, 10000);
+        });
+
+        window.__procManager = {
+          kill: killProcess,
+          killAll: killAll
+        };
+      })();
+    </script>
+
     <!-- AskUserQuestion handler -->
     <script>
       (function() {
@@ -2169,6 +2806,7 @@
                 function pump() {
                   reader.read().then(function(result) {
                     if (result.done) {
+                      if (window.__messageQueue) window.__messageQueue.onStreamDone();
                       controller.close();
                       return;
                     }
@@ -2184,6 +2822,11 @@
                       if (!line) continue;
                       try {
                         var msg = JSON.parse(line);
+                        // Filter out heartbeat messages (keep connection alive, not for React)
+                        if (msg.type === 'heartbeat') {
+                          if (window.__thinkingProgress) window.__thinkingProgress.onHeartbeat();
+                          continue;
+                        }
                         if (msg.type === 'ask_user_question') {
                           console.log('[AskUser] Question received:', msg);
                           showQuestionModal(msg);
@@ -2191,7 +2834,57 @@
                           continue;
                         }
                       } catch(e) {}
+                      // Extract data from SDK messages
+                      if (msg && msg.type === 'claude_json' && msg.data) {
+                        try {
+                          var sd = msg.data;
+                          var tp = window.__thinkingProgress;
+
+                          // Extract token/usage data from result messages
+                          if (tp && sd.type === 'result' && sd.usage) {
+                            tp.onTokens(sd.usage.input_tokens, sd.usage.output_tokens);
+                          }
+
+                          // Process assistant message content blocks
+                          if (sd.type === 'assistant' && sd.message && sd.message.content) {
+                            // Extract usage from message-level usage field
+                            if (tp && sd.message.usage) {
+                              tp.onTokens(sd.message.usage.input_tokens, sd.message.usage.output_tokens);
+                            }
+                            for (var ti = 0; ti < sd.message.content.length; ti++) {
+                              var block = sd.message.content[ti];
+
+                              // Count tokens from text content (~4 chars per token)
+                              if (tp && block.type === 'text' && block.text) {
+                                tp.addStreamTokens(Math.ceil(block.text.length / 4));
+                              }
+
+                              // Count tokens from thinking content
+                              if (tp && block.type === 'thinking' && block.thinking) {
+                                tp.addThinkingTokens(Math.ceil(block.thinking.length / 4));
+                              }
+
+                              // Track todo updates
+                              if (window.__todoPanel && block.type === 'tool_use' && block.name === 'TodoWrite' && block.input && block.input.todos) {
+                                window.__todoPanel.update(block.input.todos);
+                              }
+
+                              // Track active tool for thinking indicator
+                              if (tp && block.type === 'tool_use' && block.name) {
+                                var toolLabel = block.name;
+                                if (block.input) {
+                                  if (block.input.command) toolLabel += ': ' + block.input.command.substring(0, 40);
+                                  else if (block.input.file_path) toolLabel += ': ' + block.input.file_path.split(/[/\\]/).pop();
+                                  else if (block.input.pattern) toolLabel += ': ' + block.input.pattern;
+                                }
+                                tp.onToolUse(toolLabel);
+                              }
+                            }
+                          }
+                        } catch(te) {}
+                      }
                       // Forward all other lines to React
+                      if (window.__thinkingProgress) window.__thinkingProgress.onChunk(line.length);
                       controller.enqueue(new TextEncoder().encode(line + '\n'));
                     }
                     pump();
