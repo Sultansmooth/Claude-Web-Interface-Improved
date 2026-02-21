@@ -685,25 +685,6 @@
 
           panel.appendChild(list);
 
-          // Divider
-          var divider = document.createElement('div');
-          divider.style.cssText = 'height:1px;margin:2px 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
-          panel.appendChild(divider);
-
-          // Rename Tab tool
-          var toolsRow = document.createElement('div');
-          toolsRow.style.cssText = 'padding:4px 6px;';
-          var renameBtn = document.createElement('button');
-          renameBtn.textContent = 'Rename Tab';
-          renameBtn.title = 'Rename browser tab (F2)';
-          renameBtn.style.cssText = 'width:100%;text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;border:none;transition:background 0.15s;' +
-            (dark ? 'background:#1e293b;color:#a78bfa;' : 'background:#e2e8f0;color:#7c3aed;');
-          renameBtn.onmouseenter = function() { renameBtn.style.background = dark ? '#334155' : '#cbd5e1'; };
-          renameBtn.onmouseleave = function() { renameBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
-          renameBtn.onclick = function() { if (window._renameTab) window._renameTab(); };
-          toolsRow.appendChild(renameBtn);
-          panel.appendChild(toolsRow);
-
           // Reset link
           var resetRow = document.createElement('div');
           resetRow.style.cssText = 'padding:4px 12px 8px;text-align:center;';
@@ -745,6 +726,95 @@
 
         window.addEventListener('load', function() {
           render();
+          observer.observe(document.documentElement, { attributes: true });
+        });
+      })();
+    </script>
+
+    <!-- Right-side utility toolbar -->
+    <script>
+      (function() {
+        var AUTOSCROLL_KEY = 'claude-webui-autoscroll';
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+        function isAutoScroll() { return localStorage.getItem(AUTOSCROLL_KEY) !== '0'; }
+        function setAutoScroll(v) { localStorage.setItem(AUTOSCROLL_KEY, v ? '1' : '0'); }
+
+        function getChatContainer() {
+          var candidates = document.querySelectorAll('div');
+          for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            var style = window.getComputedStyle(el);
+            if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                el.scrollHeight > el.clientHeight + 50 &&
+                el.clientHeight > 200) {
+              return el;
+            }
+          }
+          return null;
+        }
+
+        function scrollToBottom() {
+          var container = getChatContainer();
+          if (container) container.scrollTop = container.scrollHeight;
+        }
+
+        var scrollObserver = null;
+        function setupScrollObserver() {
+          if (scrollObserver) scrollObserver.disconnect();
+          scrollObserver = new MutationObserver(function() {
+            if (isAutoScroll()) scrollToBottom();
+          });
+          scrollObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        }
+
+        function render() {
+          var existing = document.getElementById('util-toolbar');
+          if (existing) existing.remove();
+
+          var dark = isDark();
+          var autoScroll = isAutoScroll();
+
+          var toolbar = document.createElement('div');
+          toolbar.id = 'util-toolbar';
+          toolbar.style.cssText = 'position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:100000;display:flex;flex-direction:column;gap:4px;padding:4px;border-radius:10px;border:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:0 2px 8px rgba(0,0,0,0.08);' +
+            (dark ? 'background:#0f172a;' : 'background:#f8fafc;');
+
+          var scrollBtn = document.createElement('button');
+          scrollBtn.innerHTML = autoScroll ? '&#x2B07;&#xFE0F;' : '&#x23F8;&#xFE0F;';
+          scrollBtn.title = autoScroll ? 'Auto-scroll ON (click to pause)' : 'Auto-scroll OFF (click to resume)';
+          scrollBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (autoScroll ? 'opacity:1;' : 'opacity:0.5;');
+          scrollBtn.onmouseenter = function() { scrollBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          scrollBtn.onmouseleave = function() { scrollBtn.style.background = 'transparent'; };
+          scrollBtn.onclick = function() {
+            setAutoScroll(!autoScroll);
+            if (!autoScroll) scrollToBottom();
+            render();
+          };
+          toolbar.appendChild(scrollBtn);
+
+          var renameBtn = document.createElement('button');
+          renameBtn.innerHTML = '&#x270F;&#xFE0F;';
+          renameBtn.title = 'Rename tab (F2)';
+          renameBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;';
+          renameBtn.onmouseenter = function() { renameBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          renameBtn.onmouseleave = function() { renameBtn.style.background = 'transparent'; };
+          renameBtn.onclick = function() { if (window._renameTab) window._renameTab(); };
+          toolbar.appendChild(renameBtn);
+
+          document.body.appendChild(toolbar);
+        }
+
+        var observer = new MutationObserver(function(mutations) {
+          mutations.forEach(function(m) {
+            if (m.attributeName === 'class') render();
+          });
+        });
+
+        window.addEventListener('load', function() {
+          render();
+          setupScrollObserver();
           observer.observe(document.documentElement, { attributes: true });
         });
       })();
@@ -799,6 +869,258 @@
             subtree: true
           });
         });
+      })();
+    </script>
+
+    <!-- AskUserQuestion handler -->
+    <script>
+      (function() {
+        // Track the current requestId from outgoing chat requests
+        var currentRequestId = null;
+
+        // Monkey-patch fetch to intercept /api/chat streams
+        var originalFetch = window.fetch;
+        window.fetch = function() {
+          var args = arguments;
+          var url = (args[0] && typeof args[0] === 'string') ? args[0] : (args[0] && args[0].url ? args[0].url : '');
+          var opts = args[1] || {};
+
+          // Capture requestId from outgoing chat requests
+          if (url.indexOf('/api/chat') !== -1 && opts.method && opts.method.toUpperCase() === 'POST' && opts.body) {
+            try {
+              var bodyObj = JSON.parse(opts.body);
+              if (bodyObj.requestId) {
+                currentRequestId = bodyObj.requestId;
+                console.log('[AskUser] Tracking requestId:', currentRequestId);
+              }
+            } catch(e) {}
+          }
+
+          return originalFetch.apply(this, args).then(function(response) {
+            // Only intercept /api/chat streaming responses
+            if (url.indexOf('/api/chat') === -1 || !response.body) return response;
+
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = '';
+
+            var newStream = new ReadableStream({
+              start: function(controller) {
+                function pump() {
+                  reader.read().then(function(result) {
+                    if (result.done) {
+                      controller.close();
+                      return;
+                    }
+                    var text = decoder.decode(result.value, { stream: true });
+                    buffer += text;
+
+                    // Process complete NDJSON lines
+                    var lines = buffer.split('\n');
+                    buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+                    for (var i = 0; i < lines.length; i++) {
+                      var line = lines[i].trim();
+                      if (!line) continue;
+                      try {
+                        var msg = JSON.parse(line);
+                        if (msg.type === 'ask_user_question') {
+                          console.log('[AskUser] Question received:', msg);
+                          showQuestionModal(msg);
+                          // Don't forward this custom message to React
+                          continue;
+                        }
+                      } catch(e) {}
+                      // Forward all other lines to React
+                      controller.enqueue(new TextEncoder().encode(line + '\n'));
+                    }
+                    pump();
+                  }).catch(function(err) {
+                    controller.error(err);
+                  });
+                }
+                pump();
+              }
+            });
+
+            return new Response(newStream, {
+              headers: response.headers,
+              status: response.status,
+              statusText: response.statusText
+            });
+          });
+        };
+
+        // Show question modal
+        function showQuestionModal(msg) {
+          // Remove existing modal if any
+          var existing = document.getElementById('ask-user-modal');
+          if (existing) existing.remove();
+
+          var questions = msg.questions || [];
+          if (questions.length === 0) return;
+
+          var overlay = document.createElement('div');
+          overlay.id = 'ask-user-modal';
+          overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;';
+
+          var modal = document.createElement('div');
+          modal.style.cssText = 'background:#1e1e2e;border:1px solid #444;border-radius:12px;padding:24px;max-width:560px;width:90%;max-height:80vh;overflow-y:auto;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+
+          var title = document.createElement('div');
+          title.style.cssText = 'font-size:14px;font-weight:600;color:#a0a0b0;margin-bottom:16px;text-transform:uppercase;letter-spacing:0.5px;';
+          title.textContent = 'Claude has a question';
+          modal.appendChild(title);
+
+          var selections = {}; // questionText -> selected answer(s)
+
+          questions.forEach(function(q, qIdx) {
+            var qBlock = document.createElement('div');
+            qBlock.style.cssText = 'margin-bottom:20px;';
+
+            if (q.header) {
+              var header = document.createElement('div');
+              header.style.cssText = 'display:inline-block;background:#3a3a5a;color:#c0c0e0;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-bottom:8px;';
+              header.textContent = q.header;
+              qBlock.appendChild(header);
+            }
+
+            var qText = document.createElement('div');
+            qText.style.cssText = 'font-size:15px;font-weight:500;margin-bottom:12px;line-height:1.4;';
+            qText.textContent = q.question;
+            qBlock.appendChild(qText);
+
+            var opts = q.options || [];
+            var isMulti = q.multiSelect === true;
+            selections[q.question] = isMulti ? [] : '';
+
+            opts.forEach(function(opt, oIdx) {
+              var optEl = document.createElement('label');
+              optEl.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:10px 12px;margin-bottom:6px;background:#2a2a3e;border:1px solid #3a3a5a;border-radius:8px;cursor:pointer;transition:border-color 0.15s;';
+              optEl.onmouseover = function() { this.style.borderColor = '#6a6aaa'; };
+              optEl.onmouseout = function() { if (!this.querySelector('input').checked) this.style.borderColor = '#3a3a5a'; else this.style.borderColor = '#7a7afa'; };
+
+              var input = document.createElement('input');
+              input.type = isMulti ? 'checkbox' : 'radio';
+              input.name = 'ask_q_' + qIdx;
+              input.value = opt.label;
+              input.style.cssText = 'margin-top:3px;accent-color:#7a7afa;';
+              input.onchange = function() {
+                if (isMulti) {
+                  var arr = [];
+                  qBlock.querySelectorAll('input:checked').forEach(function(cb) { arr.push(cb.value); });
+                  selections[q.question] = arr.join(', ');
+                } else {
+                  selections[q.question] = this.value;
+                  // Update border styling for radio buttons
+                  qBlock.querySelectorAll('label').forEach(function(l) { l.style.borderColor = '#3a3a5a'; });
+                  this.closest('label').style.borderColor = '#7a7afa';
+                }
+              };
+
+              var textWrap = document.createElement('div');
+              var labelText = document.createElement('div');
+              labelText.style.cssText = 'font-size:14px;font-weight:500;';
+              labelText.textContent = opt.label;
+              textWrap.appendChild(labelText);
+
+              if (opt.description) {
+                var desc = document.createElement('div');
+                desc.style.cssText = 'font-size:12px;color:#888;margin-top:2px;';
+                desc.textContent = opt.description;
+                textWrap.appendChild(desc);
+              }
+
+              optEl.appendChild(input);
+              optEl.appendChild(textWrap);
+              qBlock.appendChild(optEl);
+            });
+
+            // "Other" free-text option
+            var otherEl = document.createElement('label');
+            otherEl.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:10px 12px;margin-bottom:6px;background:#2a2a3e;border:1px solid #3a3a5a;border-radius:8px;cursor:pointer;transition:border-color 0.15s;';
+
+            var otherInput = document.createElement('input');
+            otherInput.type = isMulti ? 'checkbox' : 'radio';
+            otherInput.name = 'ask_q_' + qIdx;
+            otherInput.value = '__other__';
+            otherInput.style.cssText = 'margin-top:3px;accent-color:#7a7afa;';
+
+            var otherWrap = document.createElement('div');
+            otherWrap.style.cssText = 'flex:1;';
+            var otherLabel = document.createElement('div');
+            otherLabel.style.cssText = 'font-size:14px;font-weight:500;';
+            otherLabel.textContent = 'Other';
+            otherWrap.appendChild(otherLabel);
+
+            var otherTextInput = document.createElement('input');
+            otherTextInput.type = 'text';
+            otherTextInput.placeholder = 'Type your answer...';
+            otherTextInput.style.cssText = 'width:100%;margin-top:6px;padding:6px 8px;background:#1e1e2e;border:1px solid #3a3a5a;border-radius:4px;color:#e0e0e0;font-size:13px;display:none;';
+            otherWrap.appendChild(otherTextInput);
+
+            otherInput.onchange = function() {
+              if (this.checked) {
+                otherTextInput.style.display = 'block';
+                otherTextInput.focus();
+                if (!isMulti) {
+                  qBlock.querySelectorAll('label').forEach(function(l) { l.style.borderColor = '#3a3a5a'; });
+                }
+                this.closest('label').style.borderColor = '#7a7afa';
+              } else {
+                otherTextInput.style.display = 'none';
+              }
+            };
+            otherTextInput.oninput = function() {
+              selections[q.question] = this.value;
+            };
+
+            otherEl.appendChild(otherInput);
+            otherEl.appendChild(otherWrap);
+            qBlock.appendChild(otherEl);
+
+            modal.appendChild(qBlock);
+          });
+
+          // Submit button
+          var btnWrap = document.createElement('div');
+          btnWrap.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:8px;';
+
+          var submitBtn = document.createElement('button');
+          submitBtn.textContent = 'Submit';
+          submitBtn.style.cssText = 'padding:8px 24px;background:#7a7afa;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;transition:background 0.15s;';
+          submitBtn.onmouseover = function() { this.style.background = '#6a6aea'; };
+          submitBtn.onmouseout = function() { this.style.background = '#7a7afa'; };
+          submitBtn.onclick = function() {
+            // Build answers object
+            var answers = {};
+            questions.forEach(function(q) {
+              answers[q.question] = selections[q.question] || '';
+            });
+            console.log('[AskUser] Submitting answers:', answers);
+
+            // POST to backend
+            originalFetch('/api/answer/' + encodeURIComponent(msg.requestId), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                questionId: msg.questionId,
+                answers: answers
+              })
+            }).then(function(resp) {
+              console.log('[AskUser] Answer submitted, status:', resp.status);
+            }).catch(function(err) {
+              console.error('[AskUser] Failed to submit answer:', err);
+            });
+
+            overlay.remove();
+          };
+
+          btnWrap.appendChild(submitBtn);
+          modal.appendChild(btnWrap);
+          overlay.appendChild(modal);
+          document.body.appendChild(overlay);
+        }
       })();
     </script>
   </body>
