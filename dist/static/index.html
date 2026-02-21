@@ -870,8 +870,8 @@
         function setCollapsed(v) { localStorage.setItem(CMDS_COLLAPSED_KEY, v ? '1' : '0'); }
         function isDark() { return document.documentElement.classList.contains('dark'); }
         function getPos() {
-          try { return JSON.parse(localStorage.getItem(POS_KEY)) || { top: 40, left: 8 }; }
-          catch { return { top: 40, left: 8 }; }
+          try { return JSON.parse(localStorage.getItem(POS_KEY)) || { top: 40, left: 54 }; }
+          catch { return { top: 40, left: 54 }; }
         }
         function savePos(pos) { localStorage.setItem(POS_KEY, JSON.stringify(pos)); }
 
@@ -1337,7 +1337,7 @@
 
           var toolbar = document.createElement('div');
           toolbar.id = 'util-toolbar';
-          toolbar.style.cssText = 'position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:100000;display:flex;flex-direction:column;gap:4px;padding:4px;border-radius:10px;border:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:0 2px 8px rgba(0,0,0,0.08);' +
+          toolbar.style.cssText = 'position:fixed;left:8px;top:40px;z-index:100000;display:flex;flex-direction:column;gap:4px;padding:4px;border-radius:10px;border:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:0 2px 8px rgba(0,0,0,0.08);' +
             (dark ? 'background:#0f172a;' : 'background:#f8fafc;');
 
           var scrollBtn = document.createElement('button');
