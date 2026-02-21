@@ -41,11 +41,17 @@
         else if (autoName) document.title = autoName;
 
         // Set auto-title from project path (called by sidebar + cd detection)
-        window._autoTitleFromPath = function(path) {
+        // Optional customLabel parameter uses the project's renamed label
+        window._autoTitleFromPath = function(path, customLabel) {
           // Don't override manual name
           if (localStorage.getItem(MANUAL_KEY)) return;
-          var parts = path.replace(/\\/g, '/').replace(/\/$/, '').split('/');
-          var name = parts[parts.length - 1] || path;
+          var name;
+          if (customLabel) {
+            name = customLabel;
+          } else {
+            var parts = path.replace(/\\/g, '/').replace(/\/$/, '').split('/');
+            name = parts[parts.length - 1] || path;
+          }
           document.title = name;
           localStorage.setItem(AUTO_KEY, name);
         };
@@ -291,6 +297,24 @@
           topDivider.style.cssText = 'height:1px;margin:0 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
           panel.appendChild(topDivider);
 
+          // Rename helper
+          function doRename(idx, currentLabel, folderName) {
+            var newName = prompt('Rename project:\n(leave blank to reset to folder name: ' + folderName + ')', currentLabel);
+            if (newName === null) return; // cancelled
+            var its = getItems();
+            if (newName.trim() === '' || newName.trim() === folderName) {
+              delete its[idx].label;
+            } else {
+              its[idx].label = newName.trim();
+            }
+            saveItems(its);
+            // Update tab title if this is the active project
+            if (its[idx].path === getActiveDir() && window._autoTitleFromPath) {
+              window._autoTitleFromPath(its[idx].path, its[idx].label);
+            }
+            render();
+          }
+
           // Item list
           var dragIdx = null;
           var list = document.createElement('div');
@@ -349,13 +373,27 @@
                 row.appendChild(handle);
 
                 var parts = item.path.replace(/\\/g, '/').replace(/\/$/, '').split('/');
-                var label = parts[parts.length - 1] || item.path;
+                var folderName = parts[parts.length - 1] || item.path;
+                var label = item.label || folderName;
 
                 var nameSpan = document.createElement('span');
                 nameSpan.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;';
                 nameSpan.textContent = label;
-                nameSpan.title = item.path + '\nClick to paste: cd ' + item.path;
+                nameSpan.title = item.path + (item.label ? '\n(' + folderName + ')' : '') + '\nClick to paste: cd ' + item.path + '\nDouble-click to rename';
                 row.appendChild(nameSpan);
+
+                // Rename button
+                var renameBtn = document.createElement('button');
+                renameBtn.textContent = '\u270F';
+                renameBtn.title = 'Rename';
+                renameBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:11px;padding:0 2px;opacity:0.2;transition:opacity 0.15s;flex-shrink:0;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+                renameBtn.onmouseenter = function() { renameBtn.style.opacity = '0.8'; renameBtn.style.color = dark ? '#60a5fa' : '#3b82f6'; };
+                renameBtn.onmouseleave = function() { renameBtn.style.opacity = '0.2'; renameBtn.style.color = dark ? '#94a3b8' : '#64748b'; };
+                renameBtn.onclick = function(e) {
+                  e.stopPropagation();
+                  doRename(idx, label, folderName);
+                };
+                row.appendChild(renameBtn);
 
                 var delBtn = document.createElement('button');
                 delBtn.innerHTML = '&times;';
@@ -372,11 +410,18 @@
                 };
                 row.appendChild(delBtn);
 
+                // Double-click nameSpan to rename
+                nameSpan.ondblclick = function(e) {
+                  e.stopPropagation();
+                  doRename(idx, label, folderName);
+                };
+
                 row.onclick = function(e) {
-                  if (e.target === delBtn) return;
+                  if (e.target === delBtn || e.target === renameBtn) return;
                   sendToChat('cd ' + item.path);
                   setActiveDir(item.path);
-                  if (window._autoTitleFromPath) window._autoTitleFromPath(item.path);
+                  if (window._autoTitleFromPath) window._autoTitleFromPath(item.path, item.label);
+                  if (window._updateDirChip) window._updateDirChip();
                   render();
                 };
               }
@@ -427,7 +472,7 @@
 
           var footer = document.createElement('div');
           footer.style.cssText = 'padding:8px 12px;font-size:10px;text-align:center;color:' + (dark ? '#475569' : '#94a3b8') + ';border-top:1px solid ' + (dark ? '#1e293b' : '#e2e8f0') + ';';
-          footer.textContent = 'Click to paste cd into chat';
+          footer.textContent = 'Click \u2192 cd | Dbl-click \u2192 rename';
           panel.appendChild(footer);
         }
 
@@ -442,11 +487,13 @@
             return;
           }
 
-          // Active dir label
+          // Active dir label (use custom name if set)
           var dirLabel = document.createElement('div');
           dirLabel.style.cssText = 'padding:10px 12px 6px;font-size:11px;color:' + (dark ? '#64748b' : '#94a3b8') + ';';
           var dirParts = activeDir.replace(/\\/g, '/').replace(/\/$/, '').split('/');
-          dirLabel.textContent = dirParts[dirParts.length - 1] || activeDir;
+          var activeDirName = dirParts[dirParts.length - 1] || activeDir;
+          var activeDirItem = getItems().find(function(it) { return it.type === 'dir' && it.path === activeDir; });
+          dirLabel.textContent = (activeDirItem && activeDirItem.label) || activeDirName;
           panel.appendChild(dirLabel);
 
           var divider = document.createElement('div');
@@ -542,6 +589,13 @@
         window.addEventListener('load', function() {
           render();
           observer.observe(document.documentElement, { attributes: true });
+          // On load, sync tab title with active project's custom label
+          var activeDir = getActiveDir();
+          if (activeDir && window._autoTitleFromPath) {
+            var items = getItems();
+            var activeItem = items.find(function(it) { return it.type === 'dir' && it.path === activeDir; });
+            if (activeItem) window._autoTitleFromPath(activeDir, activeItem.label);
+          }
         });
       })();
     </script>
@@ -628,9 +682,45 @@
 
           row.appendChild(input);
 
+          // Active directory chip
+          var ACTIVE_DIR_KEY = 'claude-webui-active-dir';
+          var activeDir = localStorage.getItem(ACTIVE_DIR_KEY) || '';
+          if (activeDir) {
+            var chip = document.createElement('span');
+            chip.id = 'active-dir-chip';
+            chip.title = activeDir;
+            chip.textContent = activeDir;
+            chip.style.cssText = 'display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 10px;border-radius:12px;font-size:11px;font-family:ui-monospace,monospace;cursor:default;user-select:all;' +
+              (dark
+                ? 'background:#1e293b;color:#64748b;border:1px solid #334155;'
+                : 'background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;');
+            row.appendChild(chip);
+          }
+
           // Insert after the header row
           headerRow.parentNode.insertBefore(row, headerRow.nextSibling);
         }
+
+        // Update the directory chip without full re-inject
+        window._updateDirChip = function() {
+          var chip = document.getElementById('active-dir-chip');
+          var ACTIVE_DIR_KEY = 'claude-webui-active-dir';
+          var activeDir = localStorage.getItem(ACTIVE_DIR_KEY) || '';
+          if (chip) {
+            if (activeDir) {
+              chip.textContent = activeDir;
+              chip.title = activeDir;
+              chip.style.display = 'inline-block';
+            } else {
+              chip.style.display = 'none';
+            }
+          } else if (activeDir) {
+            // Chip doesn't exist yet, re-inject to create it
+            var existing = document.getElementById('session-title-row');
+            if (existing) existing.remove();
+            injectTitle();
+          }
+        };
 
         // Use MutationObserver to detect when session info appears in DOM
         var obs = new MutationObserver(function() {
