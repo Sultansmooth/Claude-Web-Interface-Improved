@@ -1437,12 +1437,30 @@
         }
 
         var scrollObserver = null;
+        var _savedScrollTop = null;
         function setupScrollObserver() {
           if (scrollObserver) scrollObserver.disconnect();
           scrollObserver = new MutationObserver(function() {
-            if (isAutoScroll()) scrollToBottom();
+            var container = getChatContainer();
+            if (!container) return;
+            if (isAutoScroll()) {
+              _savedScrollTop = null;
+              container.scrollTop = container.scrollHeight;
+            } else {
+              // When auto-scroll is OFF, lock the scroll position
+              if (_savedScrollTop !== null) {
+                container.scrollTop = _savedScrollTop;
+              }
+            }
           });
           scrollObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+          // Track manual scrolling so we know where to lock
+          setInterval(function() {
+            if (!isAutoScroll()) {
+              var container = getChatContainer();
+              if (container) _savedScrollTop = container.scrollTop;
+            }
+          }, 200);
         }
 
         function render() {
@@ -1465,8 +1483,17 @@
           scrollBtn.onmouseenter = function() { scrollBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
           scrollBtn.onmouseleave = function() { scrollBtn.style.background = 'transparent'; };
           scrollBtn.onclick = function() {
-            setAutoScroll(!autoScroll);
-            if (!autoScroll) scrollToBottom();
+            var wasOn = autoScroll;
+            setAutoScroll(!wasOn);
+            if (!wasOn) {
+              // Turning ON — scroll to bottom and clear lock
+              _savedScrollTop = null;
+              scrollToBottom();
+            } else {
+              // Turning OFF — save current position to lock it
+              var container = getChatContainer();
+              if (container) _savedScrollTop = container.scrollTop;
+            }
             render();
           };
           toolbar.appendChild(scrollBtn);
