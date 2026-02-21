@@ -2170,6 +2170,31 @@
         });
         setInterval(watchSessionId, 3000);
 
+        // Detect when React navigates back from history view to a blank conversation.
+        // If we have a saved session, redirect with ?sessionId= so React loads it.
+        var _lastUrl = window.location.href;
+        var _wasOnHistoryView = window.location.search.indexOf('view=history') !== -1;
+        setInterval(function() {
+          var currentUrl = window.location.href;
+          var onHistoryNow = window.location.search.indexOf('view=history') !== -1;
+          if (onHistoryNow) { _wasOnHistoryView = true; }
+          if (currentUrl !== _lastUrl) {
+            _lastUrl = currentUrl;
+            var params = new URLSearchParams(window.location.search);
+            // Just left history view and landed on blank conversation (no sessionId)
+            if (_wasOnHistoryView && !onHistoryNow && !params.get('sessionId')) {
+              _wasOnHistoryView = false;
+              var saved = getSavedSession();
+              if (saved && saved.sessionId && isFullUUID(saved.sessionId)) {
+                console.log('[Session Restore] Back from history, redirecting to session:', saved.sessionId);
+                params.set('sessionId', saved.sessionId);
+                window.location.replace(window.location.pathname + '?' + params.toString());
+                return;
+              }
+            }
+          }
+        }, 300);
+
         // Intercept outgoing /api/chat to inject saved sessionId
         var _origFetch = window.fetch;
         window.fetch = function() {
@@ -2201,6 +2226,28 @@
                 console.log('[Session Restore] Saved session:', bodyObj.sessionId);
               }
             } catch(e) {}
+          }
+
+          // Intercept /histories responses to sort by most recent activity
+          if (url.indexOf('/histories') !== -1) {
+            return _origFetch.apply(this, args).then(function(response) {
+              var cloned = response.clone();
+              return cloned.json().then(function(data) {
+                if (data && Array.isArray(data.conversations)) {
+                  data.conversations.sort(function(a, b) {
+                    var ta = a.lastTime || a.startTime || '';
+                    var tb = b.lastTime || b.startTime || '';
+                    return ta > tb ? -1 : ta < tb ? 1 : 0;
+                  });
+                  return new Response(JSON.stringify(data), {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: response.headers
+                  });
+                }
+                return response;
+              }).catch(function() { return response; });
+            });
           }
 
           return _origFetch.apply(this, args);
