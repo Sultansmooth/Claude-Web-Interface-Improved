@@ -2473,7 +2473,7 @@ function createApp(runtime2, config) {
       const { exec } = await import("node:child_process");
       const platform = process.platform;
       let cmd;
-      if (platform === "win32") cmd = `start "" "${filePath}"`;
+      if (platform === "win32") cmd = `start "" "notepad++" "${filePath}" || notepad "${filePath}"`;
       else if (platform === "darwin") cmd = `open "${filePath}"`;
       else cmd = `xdg-open "${filePath}"`;
       exec(cmd);
