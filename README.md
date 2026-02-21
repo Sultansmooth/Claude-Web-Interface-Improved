@@ -14,18 +14,10 @@ A modified version of [claude-code-webui](https://github.com/sugyan/claude-code-
 - [Git](https://git-scm.com/)
 - [Claude CLI](https://github.com/anthropics/claude-code) installed and authenticated
 
-### Setup
+### Quick Install
 
 ```bash
-# Clone the repo
-git clone https://github.com/Sultansmooth/Claude-Web-Interface-Improved.git
-cd Claude-Web-Interface-Improved
-
-# Install dependencies
-npm install
-
-# Install globally so you can run it from anywhere
-npm install -g .
+npm install -g Sultansmooth/Claude-Web-Interface-Improved
 ```
 
 Then just run:
@@ -38,12 +30,8 @@ And open your browser to http://localhost:8080.
 
 ### Updating
 
-Pull the latest changes and reinstall:
-
 ```bash
-cd Claude-Web-Interface-Improved
-git pull
-npm install -g .
+npm install -g Sultansmooth/Claude-Web-Interface-Improved
 ```
 
 > **Note:** Do not use `npm update -g claude-code-webui` — that would overwrite this version with the original unmodified package.
