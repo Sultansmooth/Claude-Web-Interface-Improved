@@ -421,7 +421,6 @@
                   sendToChat('cd ' + item.path);
                   setActiveDir(item.path);
                   if (window._autoTitleFromPath) window._autoTitleFromPath(item.path, item.label);
-                  if (window._updateDirChip) window._updateDirChip();
                   render();
                 };
               }
@@ -682,45 +681,9 @@
 
           row.appendChild(input);
 
-          // Active directory chip
-          var ACTIVE_DIR_KEY = 'claude-webui-active-dir';
-          var activeDir = localStorage.getItem(ACTIVE_DIR_KEY) || '';
-          if (activeDir) {
-            var chip = document.createElement('span');
-            chip.id = 'active-dir-chip';
-            chip.title = activeDir;
-            chip.textContent = activeDir;
-            chip.style.cssText = 'display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 10px;border-radius:12px;font-size:11px;font-family:ui-monospace,monospace;cursor:default;user-select:all;' +
-              (dark
-                ? 'background:#1e293b;color:#64748b;border:1px solid #334155;'
-                : 'background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;');
-            row.appendChild(chip);
-          }
-
           // Insert after the header row
           headerRow.parentNode.insertBefore(row, headerRow.nextSibling);
         }
-
-        // Update the directory chip without full re-inject
-        window._updateDirChip = function() {
-          var chip = document.getElementById('active-dir-chip');
-          var ACTIVE_DIR_KEY = 'claude-webui-active-dir';
-          var activeDir = localStorage.getItem(ACTIVE_DIR_KEY) || '';
-          if (chip) {
-            if (activeDir) {
-              chip.textContent = activeDir;
-              chip.title = activeDir;
-              chip.style.display = 'inline-block';
-            } else {
-              chip.style.display = 'none';
-            }
-          } else if (activeDir) {
-            // Chip doesn't exist yet, re-inject to create it
-            var existing = document.getElementById('session-title-row');
-            if (existing) existing.remove();
-            injectTitle();
-          }
-        };
 
         // Use MutationObserver to detect when session info appears in DOM
         var obs = new MutationObserver(function() {
@@ -731,6 +694,119 @@
           obs.observe(document.body, { childList: true, subtree: true });
           // Initial check
           setTimeout(injectTitle, 500);
+        });
+      })();
+    </script>
+    <script>
+      // Active directory chip — fixed-position, detects cd from multiple sources
+      (function() {
+        var DIR_KEY = 'claude-webui-active-dir';
+        var PROJ_KEY = 'claude-webui-project-dirs';
+        var chipLastVal = '';
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function normalizePath(p) {
+          if (!p) return '';
+          p = p.trim().replace(/\s+&&.*/, '').replace(/\s+\|\|.*/, '');
+          // Convert git-bash /c/path to C:\path
+          var w = p.match(/^\/([a-z])\/(.*)/i);
+          if (w) p = w[1].toUpperCase() + ':\\' + w[2].replace(/\//g, '\\');
+          return p;
+        }
+
+        function setCwd(path) {
+          var p = normalizePath(path);
+          if (!p) return;
+          localStorage.setItem(DIR_KEY, p);
+          // Update tab title
+          try {
+            var items = JSON.parse(localStorage.getItem(PROJ_KEY)) || [];
+            var hit = items.find(function(x) { return x.type === 'dir' && x.path === p; });
+            if (window._autoTitleFromPath) window._autoTitleFromPath(p, hit ? hit.label : null);
+          } catch(e) {}
+        }
+
+        // --- CHIP RENDERING ---
+        function updateChip() {
+          var activeDir = localStorage.getItem(DIR_KEY) || '';
+          var chip = document.getElementById('cwd-chip');
+          if (!activeDir) { if (chip) chip.style.display = 'none'; return; }
+          if (!chip) {
+            chip = document.createElement('div');
+            chip.id = 'cwd-chip';
+            chip.style.cssText = 'position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:100001;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 14px;border-radius:14px;font-size:11px;font-family:ui-monospace,monospace;cursor:default;user-select:all;';
+            document.body.appendChild(chip);
+          }
+          var dark = isDark();
+          chip.style.display = 'block';
+          chip.style.background = dark ? '#1e293b' : '#f1f5f9';
+          chip.style.color = dark ? '#94a3b8' : '#64748b';
+          chip.style.border = '1px solid ' + (dark ? '#334155' : '#e2e8f0');
+          if (activeDir !== chipLastVal) {
+            chipLastVal = activeDir;
+            chip.textContent = activeDir;
+            chip.title = activeDir;
+          }
+        }
+
+        // --- DETECTION 1: Watch textarea for cd commands on form submit ---
+        document.addEventListener('submit', function(e) {
+          var form = e.target;
+          if (!form) return;
+          var ta = form.querySelector('textarea');
+          if (!ta) return;
+          var msg = (ta.value || '').trim();
+          var cdMatch = msg.match(/^cd\s+(.+)/i);
+          if (cdMatch) setCwd(cdMatch[1]);
+        }, true);
+
+        // --- DETECTION 2: Watch for Enter key on textarea (backup for submit) ---
+        document.addEventListener('keydown', function(e) {
+          if (e.key !== 'Enter' || e.shiftKey) return;
+          var ta = e.target;
+          if (!ta || ta.tagName !== 'TEXTAREA') return;
+          var msg = (ta.value || '').trim();
+          var cdMatch = msg.match(/^cd\s+(.+)/i);
+          if (cdMatch) setCwd(cdMatch[1]);
+        }, true);
+
+        // --- DETECTION 3: Poll DOM text for init CWD (page load only) ---
+        var initScanned = false;
+        function scanInitCwd() {
+          if (initScanned) return;
+          var pres = document.querySelectorAll('pre');
+          for (var i = 0; i < pres.length; i++) {
+            var txt = pres[i].textContent || '';
+            if (txt.indexOf('CWD:') !== -1) {
+              var m = txt.match(/CWD:\s*(.+)/);
+              if (m) {
+                var d = m[1].trim();
+                // Stop at newline content
+                d = d.split('\n')[0].trim();
+                initScanned = true;
+                // Only set if no active dir already set
+                if (!localStorage.getItem(DIR_KEY)) {
+                  setCwd(d);
+                }
+                return;
+              }
+            }
+          }
+        }
+
+        // --- DETECTION 4: Sidebar clicks already call setActiveDir directly ---
+        // (no extra code needed, the chip polls localStorage)
+
+        // Poll chip display every 300ms
+        setInterval(updateChip, 300);
+
+        window.addEventListener('load', function() {
+          updateChip();
+          // Scan for init CWD after React renders
+          setTimeout(scanInitCwd, 1000);
+          setTimeout(scanInitCwd, 2500);
+          setTimeout(scanInitCwd, 5000);
         });
       })();
     </script>
@@ -1025,6 +1101,7 @@
         var AUTOSCROLL_KEY = 'claude-webui-autoscroll';
         var FONTSIZE_KEY = 'claude-webui-fontsize';
         var NOTIFY_KEY = 'claude-webui-notify-sound';
+        var JOB_QUEUE_KEY = 'claude-webui-job-queue';
         var FONT_STEPS = [12, 13, 14, 15, 16, 18, 20];
         var DEFAULT_FONT_IDX = 2; // 14px
 
@@ -1056,14 +1133,73 @@
           } catch(e) {}
         }
 
-        // Watch for response completion
+        // --- Job Queue Engine ---
+        function getJobQueue() {
+          try { return JSON.parse(localStorage.getItem(JOB_QUEUE_KEY)) || { jobs: [] }; }
+          catch(e) { return { jobs: [] }; }
+        }
+        function saveJobQueue(q) { localStorage.setItem(JOB_QUEUE_KEY, JSON.stringify(q)); }
+
+        var jobQueueRunning = false;
+        var jobQueueWaitingForStart = false;
+
+        function startJobQueue() {
+          jobQueueRunning = true;
+          runNextJob();
+        }
+        function pauseJobQueue() {
+          jobQueueRunning = false;
+          updateJobQueuePanel();
+        }
+        function clearJobQueue() {
+          jobQueueRunning = false;
+          saveJobQueue({ jobs: [] });
+          updateJobQueuePanel();
+        }
+        function runNextJob() {
+          if (!jobQueueRunning) { updateJobQueuePanel(); return; }
+          var q = getJobQueue();
+          var nextJob = null;
+          for (var i = 0; i < q.jobs.length; i++) {
+            if (q.jobs[i].status === 'pending') { nextJob = q.jobs[i]; break; }
+          }
+          if (!nextJob) {
+            jobQueueRunning = false;
+            updateJobQueuePanel();
+            if (isNotifyEnabled()) playNotifySound();
+            return;
+          }
+          nextJob.status = 'running';
+          saveJobQueue(q);
+          updateJobQueuePanel();
+          sendToChat(nextJob.prompt);
+          jobQueueWaitingForStart = true;
+        }
+        function onJobComplete() {
+          var q = getJobQueue();
+          for (var i = 0; i < q.jobs.length; i++) {
+            if (q.jobs[i].status === 'running') { q.jobs[i].status = 'done'; break; }
+          }
+          saveJobQueue(q);
+          updateJobQueuePanel();
+          if (jobQueueRunning) {
+            setTimeout(runNextJob, 1500);
+          }
+        }
+
+        // Watch for response completion (notification + job queue)
         var wasProcessing = false;
         function checkProcessingState() {
           var ta = document.querySelector('textarea[placeholder="Processing..."]');
           var isProcessing = !!ta;
           if (wasProcessing && !isProcessing && isNotifyEnabled() && document.hidden) {
-            // Just finished processing in a background tab
             playNotifySound();
+          }
+          if (!wasProcessing && isProcessing && jobQueueWaitingForStart) {
+            jobQueueWaitingForStart = false;
+          }
+          if (wasProcessing && !isProcessing && jobQueueRunning) {
+            onJobComplete();
           }
           wasProcessing = isProcessing;
         }
@@ -1202,6 +1338,17 @@
           };
           toolbar.appendChild(notifyBtn);
 
+          // Job Queue toggle button
+          var queueBtn = document.createElement('button');
+          queueBtn.innerHTML = '&#x1F4DD;';
+          queueBtn.title = 'Job Queue';
+          queueBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (jobQueueRunning ? 'opacity:1;' : 'opacity:0.6;');
+          queueBtn.onmouseenter = function() { queueBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          queueBtn.onmouseleave = function() { queueBtn.style.background = 'transparent'; };
+          queueBtn.onclick = function() { toggleJobQueuePanel(); };
+          toolbar.appendChild(queueBtn);
+
           document.body.appendChild(toolbar);
         }
 
@@ -1230,6 +1377,171 @@
             window._openClaudeMd();
           }
         });
+
+        // --- Job Queue Panel ---
+        var jobQueuePanelVisible = false;
+        function toggleJobQueuePanel() {
+          jobQueuePanelVisible = !jobQueuePanelVisible;
+          updateJobQueuePanel();
+        }
+        function updateJobQueuePanel() {
+          var existing = document.getElementById('job-queue-panel');
+          if (existing) existing.remove();
+          if (!jobQueuePanelVisible) return;
+          var dark = isDark();
+          var q = getJobQueue();
+
+          var panel = document.createElement('div');
+          panel.id = 'job-queue-panel';
+          panel.style.cssText = 'position:fixed;right:0;top:0;bottom:0;width:400px;z-index:100001;display:flex;flex-direction:column;border-left:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:-4px 0 16px rgba(0,0,0,0.2);' +
+            (dark ? 'background:#0f172a;color:#e2e8f0;' : 'background:#f8fafc;color:#1e293b;');
+
+          // Header
+          var hdr = document.createElement('div');
+          hdr.style.cssText = 'padding:16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;align-items:center;justify-content:space-between;flex-shrink:0;';
+          var ttl = document.createElement('div');
+          ttl.style.cssText = 'font-size:15px;font-weight:600;';
+          var dc = 0;
+          for (var i = 0; i < q.jobs.length; i++) { if (q.jobs[i].status === 'done') dc++; }
+          ttl.textContent = 'Job Queue' + (q.jobs.length > 0 ? ' (' + dc + '/' + q.jobs.length + ')' : '');
+          hdr.appendChild(ttl);
+          var xBtn = document.createElement('button');
+          xBtn.innerHTML = '&times;';
+          xBtn.style.cssText = 'border:none;background:none;font-size:20px;cursor:pointer;padding:0 4px;' + (dark ? 'color:#94a3b8;' : 'color:#64748b;');
+          xBtn.onclick = toggleJobQueuePanel;
+          hdr.appendChild(xBtn);
+          panel.appendChild(hdr);
+
+          // Add job input
+          var addRow = document.createElement('div');
+          addRow.style.cssText = 'padding:12px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';flex-shrink:0;';
+          var jobInput = document.createElement('textarea');
+          jobInput.placeholder = 'Enter job prompt...';
+          jobInput.style.cssText = 'width:100%;min-height:60px;padding:8px;border:1px solid ' + (dark ? '#334155' : '#cbd5e1') + ';border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;' : 'background:#fff;color:#1e293b;');
+          addRow.appendChild(jobInput);
+          var addBtnRow = document.createElement('div');
+          addBtnRow.style.cssText = 'margin-top:8px;';
+          var addBtn = document.createElement('button');
+          addBtn.textContent = '+ Add Job';
+          addBtn.style.cssText = 'padding:6px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;' +
+            (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
+          addBtn.onclick = function() {
+            var text = jobInput.value.trim();
+            if (!text) return;
+            var q2 = getJobQueue();
+            q2.jobs.push({ prompt: text, status: 'pending' });
+            saveJobQueue(q2);
+            jobInput.value = '';
+            updateJobQueuePanel();
+          };
+          addBtnRow.appendChild(addBtn);
+          addRow.appendChild(addBtnRow);
+          panel.appendChild(addRow);
+
+          // Job list
+          var listWrap = document.createElement('div');
+          listWrap.style.cssText = 'flex:1;overflow-y:auto;padding:8px 16px;';
+          if (q.jobs.length === 0) {
+            var empty = document.createElement('div');
+            empty.style.cssText = 'text-align:center;padding:32px 0;opacity:0.4;font-size:13px;';
+            empty.textContent = 'No jobs yet. Add prompts above.';
+            listWrap.appendChild(empty);
+          }
+          q.jobs.forEach(function(job, idx) {
+            var isRun = job.status === 'running';
+            var isDn = job.status === 'done';
+            var card = document.createElement('div');
+            card.style.cssText = 'padding:10px 12px;margin-bottom:6px;border-radius:8px;border:1px solid ' +
+              (isRun ? '#3b82f6' : (dark ? '#334155' : '#e2e8f0')) +
+              ';display:flex;align-items:flex-start;gap:10px;' +
+              (isRun ? (dark ? 'background:#1e3a5f;' : 'background:#eff6ff;') : (dark ? 'background:#1e293b;' : 'background:#fff;')) +
+              (isDn ? 'opacity:0.45;' : '');
+
+            var ic = document.createElement('div');
+            ic.style.cssText = 'flex-shrink:0;width:22px;text-align:center;font-size:13px;padding-top:2px;font-weight:600;' +
+              (isRun ? 'color:#3b82f6;' : isDn ? 'color:#22c55e;' : (dark ? 'color:#64748b;' : 'color:#94a3b8;'));
+            ic.textContent = isDn ? '\u2713' : isRun ? '\u25B6' : (idx + 1);
+            card.appendChild(ic);
+
+            var pt = document.createElement('div');
+            pt.style.cssText = 'flex:1;font-size:13px;line-height:1.4;word-break:break-word;' +
+              (job.prompt.length > 120 ? 'max-height:3.6em;overflow:hidden;' : '');
+            pt.textContent = job.prompt;
+            pt.title = job.prompt;
+            card.appendChild(pt);
+
+            if (job.status === 'pending' && !jobQueueRunning) {
+              var bw = document.createElement('div');
+              bw.style.cssText = 'display:flex;gap:2px;flex-shrink:0;align-items:center;';
+              if (idx > 0 && q.jobs[idx - 1].status === 'pending') {
+                var ub = document.createElement('button');
+                ub.textContent = '\u25B2'; ub.title = 'Move up';
+                ub.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
+                ub.onmouseenter = function() { this.style.opacity = '1'; };
+                ub.onmouseleave = function() { this.style.opacity = '0.4'; };
+                (function(i) { ub.onclick = function() {
+                  var q2 = getJobQueue(); var t = q2.jobs[i]; q2.jobs[i] = q2.jobs[i-1]; q2.jobs[i-1] = t;
+                  saveJobQueue(q2); updateJobQueuePanel();
+                }; })(idx);
+                bw.appendChild(ub);
+              }
+              if (idx < q.jobs.length - 1 && q.jobs[idx + 1].status === 'pending') {
+                var db = document.createElement('button');
+                db.textContent = '\u25BC'; db.title = 'Move down';
+                db.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
+                db.onmouseenter = function() { this.style.opacity = '1'; };
+                db.onmouseleave = function() { this.style.opacity = '0.4'; };
+                (function(i) { db.onclick = function() {
+                  var q2 = getJobQueue(); var t = q2.jobs[i]; q2.jobs[i] = q2.jobs[i+1]; q2.jobs[i+1] = t;
+                  saveJobQueue(q2); updateJobQueuePanel();
+                }; })(idx);
+                bw.appendChild(db);
+              }
+              var dl = document.createElement('button');
+              dl.innerHTML = '&times;'; dl.title = 'Remove';
+              dl.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;padding:0 2px;opacity:0.3;' + (dark ? 'color:#e2e8f0;' : '');
+              dl.onmouseenter = function() { this.style.opacity = '1'; this.style.color = '#ef4444'; };
+              dl.onmouseleave = function() { this.style.opacity = '0.3'; this.style.color = dark ? '#e2e8f0' : ''; };
+              (function(i) { dl.onclick = function() {
+                var q2 = getJobQueue(); q2.jobs.splice(i, 1); saveJobQueue(q2); updateJobQueuePanel();
+              }; })(idx);
+              bw.appendChild(dl);
+              card.appendChild(bw);
+            }
+            listWrap.appendChild(card);
+          });
+          panel.appendChild(listWrap);
+
+          // Bottom controls
+          var ctrls = document.createElement('div');
+          ctrls.style.cssText = 'padding:12px 16px;border-top:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;gap:8px;flex-shrink:0;';
+          var hasPending = q.jobs.some(function(j) { return j.status === 'pending'; });
+          if (!jobQueueRunning && hasPending) {
+            var stBtn = document.createElement('button');
+            stBtn.textContent = '\u25B6 Start Queue';
+            stBtn.style.cssText = 'flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#3b82f6;color:#fff;';
+            stBtn.onclick = function() { startJobQueue(); updateJobQueuePanel(); };
+            ctrls.appendChild(stBtn);
+          }
+          if (jobQueueRunning) {
+            var paBtn = document.createElement('button');
+            paBtn.textContent = '\u23F8 Pause';
+            paBtn.style.cssText = 'flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#f59e0b;color:#fff;';
+            paBtn.onclick = function() { pauseJobQueue(); };
+            ctrls.appendChild(paBtn);
+          }
+          if (q.jobs.length > 0) {
+            var clBtn = document.createElement('button');
+            clBtn.textContent = 'Clear';
+            clBtn.style.cssText = 'padding:8px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;' +
+              (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
+            clBtn.onclick = function() { if (confirm('Clear all jobs?')) clearJobQueue(); };
+            ctrls.appendChild(clBtn);
+          }
+          panel.appendChild(ctrls);
+          document.body.appendChild(panel);
+        }
 
         var observer = new MutationObserver(function(mutations) {
           mutations.forEach(function(m) {
