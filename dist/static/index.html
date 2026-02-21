@@ -1186,8 +1186,11 @@
         // Plans stored in localStorage (shared across tabs)
         // { plans: [ { id, name, jobs: [{ prompt, status }] } ] }
         function getAllPlans() {
-          try { return JSON.parse(localStorage.getItem(JOB_QUEUE_KEY)) || { plans: [] }; }
-          catch(e) { return { plans: [] }; }
+          try {
+            var raw = JSON.parse(localStorage.getItem(JOB_QUEUE_KEY));
+            if (!raw || !Array.isArray(raw.plans)) return { plans: [] };
+            return raw;
+          } catch(e) { return { plans: [] }; }
         }
         function saveAllPlans(data) { localStorage.setItem(JOB_QUEUE_KEY, JSON.stringify(data)); }
         function getPlan(planId) {
