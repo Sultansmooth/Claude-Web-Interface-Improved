@@ -2172,7 +2172,9 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
   let abortController;
   try {
     let processedMessage = message;
-    if (message.startsWith("/")) {
+    if (message === "/compact" || message === "compact") {
+      processedMessage = "Please provide a concise summary of our entire conversation so far, including: what project we're working on, what changes have been made, what the current state is, and any pending tasks. Format it as a brief status update I can use to continue the conversation if context is lost.";
+    } else if (message.startsWith("/")) {
       processedMessage = message.substring(1);
     }
     abortController = new AbortController();
