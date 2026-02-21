@@ -1738,12 +1738,13 @@
         var COMMANDS = [
           { cmd: '/compact', desc: 'Clear history but keep a summary in context' },
           { cmd: '/clear', desc: 'Clear conversation history and free up context' },
-          { cmd: '/cost', desc: 'Show total cost and duration of current session' },
           { cmd: '/commit', desc: 'Commit changes with a generated message' },
+          { cmd: '/cost', desc: 'Show total cost and duration of current session' },
           { cmd: '/todos', desc: 'List current todo items' },
           { cmd: '/files', desc: 'List all files currently in context' },
           { cmd: '/init', desc: 'Initialize a new CLAUDE.md file' },
           { cmd: '/review', desc: 'Review a pull request' },
+          { cmd: '/security-review', desc: 'Security review of pending changes on current branch' },
           { cmd: '/pr-comments', desc: 'Get comments from a GitHub PR' },
           { cmd: '/export', desc: 'Export conversation to file or clipboard' },
           { cmd: '/status', desc: 'Show version, model, account info' },
@@ -1751,9 +1752,18 @@
           { cmd: '/memory', desc: 'Edit Claude memory files' },
           { cmd: '/config', desc: 'Open config panel' },
           { cmd: '/hooks', desc: 'Manage hook configurations' },
+          { cmd: '/agents', desc: 'Manage agent configurations' },
           { cmd: '/mcp', desc: 'Manage MCP servers' },
           { cmd: '/bashes', desc: 'List and manage background tasks' },
           { cmd: '/add-dir', desc: 'Add a new working directory' },
+          { cmd: '/ide', desc: 'Manage IDE integrations and show status' },
+          { cmd: '/install', desc: 'Install Claude Code native build' },
+          { cmd: '/install-github-app', desc: 'Set up Claude GitHub Actions for a repo' },
+          { cmd: '/upgrade', desc: 'Upgrade to Max for higher rate limits' },
+          { cmd: '/feedback', desc: 'Submit feedback about Claude Code' },
+          { cmd: '/privacy-settings', desc: 'View and update privacy settings' },
+          { cmd: '/migrate-installer', desc: 'Migrate from npm to local installation' },
+          { cmd: '/logout', desc: 'Sign out from your Anthropic account' },
           { cmd: '/help', desc: 'Show help and available commands' }
         ];
 
