@@ -31,16 +31,38 @@
     </script>
     <script>
       // Tab renaming - press F2 or use Tools panel
+      // Priority: manual name > auto-detected project > default
       (function() {
-        const params = new URLSearchParams(window.location.search);
-        const nameParam = params.get('name');
-        const storageKey = 'claude-tab-name-' + (nameParam || window.location.pathname);
-        const saved = localStorage.getItem(storageKey);
-        if (nameParam) document.title = nameParam;
-        else if (saved) document.title = saved;
+        var MANUAL_KEY = 'claude-tab-name-' + window.location.pathname;
+        var AUTO_KEY = 'claude-tab-autoname-' + window.location.pathname;
+        var manualName = localStorage.getItem(MANUAL_KEY);
+        var autoName = localStorage.getItem(AUTO_KEY);
+        if (manualName) document.title = manualName;
+        else if (autoName) document.title = autoName;
+
+        // Set auto-title from project path (called by sidebar + cd detection)
+        window._autoTitleFromPath = function(path) {
+          // Don't override manual name
+          if (localStorage.getItem(MANUAL_KEY)) return;
+          var parts = path.replace(/\\/g, '/').replace(/\/$/, '').split('/');
+          var name = parts[parts.length - 1] || path;
+          document.title = name;
+          localStorage.setItem(AUTO_KEY, name);
+        };
+
+        // Manual rename - overrides auto-title
         window._renameTab = function() {
-          var name = prompt('Rename this tab:', document.title);
-          if (name) { document.title = name; localStorage.setItem(storageKey, name); }
+          var name = prompt('Rename this tab (leave blank to use auto-detect):', document.title);
+          if (name === null) return; // cancelled
+          if (name.trim() === '') {
+            // Clear manual override, revert to auto
+            localStorage.removeItem(MANUAL_KEY);
+            var auto = localStorage.getItem(AUTO_KEY);
+            document.title = auto || 'Claude Code Web UI';
+          } else {
+            document.title = name;
+            localStorage.setItem(MANUAL_KEY, name);
+          }
         };
         document.addEventListener('keydown', function(e) {
           if (e.key === 'F2') { e.preventDefault(); window._renameTab(); }
@@ -278,6 +300,7 @@
                 row.onclick = function(e) {
                   if (e.target === delBtn) return;
                   sendToChat('cd ' + item.path);
+                  if (window._autoTitleFromPath) window._autoTitleFromPath(item.path);
                 };
               }
 
@@ -735,10 +758,22 @@
     <script>
       (function() {
         var AUTOSCROLL_KEY = 'claude-webui-autoscroll';
+        var FONTSIZE_KEY = 'claude-webui-fontsize';
+        var FONT_STEPS = [12, 13, 14, 15, 16, 18, 20];
+        var DEFAULT_FONT_IDX = 2; // 14px
 
         function isDark() { return document.documentElement.classList.contains('dark'); }
         function isAutoScroll() { return localStorage.getItem(AUTOSCROLL_KEY) !== '0'; }
         function setAutoScroll(v) { localStorage.setItem(AUTOSCROLL_KEY, v ? '1' : '0'); }
+        function getFontIdx() {
+          var stored = parseInt(localStorage.getItem(FONTSIZE_KEY));
+          return isNaN(stored) ? DEFAULT_FONT_IDX : Math.max(0, Math.min(FONT_STEPS.length - 1, stored));
+        }
+        function setFontIdx(idx) { localStorage.setItem(FONTSIZE_KEY, idx); }
+        function applyFontSize() {
+          var size = FONT_STEPS[getFontIdx()];
+          document.getElementById('root').style.fontSize = size + 'px';
+        }
 
         function getChatContainer() {
           var candidates = document.querySelectorAll('div');
@@ -803,6 +838,41 @@
           renameBtn.onclick = function() { if (window._renameTab) window._renameTab(); };
           toolbar.appendChild(renameBtn);
 
+          // Font size increase
+          var fontIdx = getFontIdx();
+          var fontUpBtn = document.createElement('button');
+          fontUpBtn.textContent = 'A+';
+          fontUpBtn.title = 'Increase font size (' + FONT_STEPS[fontIdx] + 'px)';
+          fontUpBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (dark ? 'color:#e2e8f0;' : 'color:#1e293b;') +
+            (fontIdx >= FONT_STEPS.length - 1 ? 'opacity:0.3;cursor:default;' : '');
+          fontUpBtn.onmouseenter = function() { if (fontIdx < FONT_STEPS.length - 1) fontUpBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          fontUpBtn.onmouseleave = function() { fontUpBtn.style.background = 'transparent'; };
+          fontUpBtn.onclick = function() {
+            if (fontIdx >= FONT_STEPS.length - 1) return;
+            setFontIdx(fontIdx + 1);
+            applyFontSize();
+            render();
+          };
+          toolbar.appendChild(fontUpBtn);
+
+          // Font size decrease
+          var fontDownBtn = document.createElement('button');
+          fontDownBtn.textContent = 'A-';
+          fontDownBtn.title = 'Decrease font size (' + FONT_STEPS[fontIdx] + 'px)';
+          fontDownBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (dark ? 'color:#e2e8f0;' : 'color:#1e293b;') +
+            (fontIdx <= 0 ? 'opacity:0.3;cursor:default;' : '');
+          fontDownBtn.onmouseenter = function() { if (fontIdx > 0) fontDownBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          fontDownBtn.onmouseleave = function() { fontDownBtn.style.background = 'transparent'; };
+          fontDownBtn.onclick = function() {
+            if (fontIdx <= 0) return;
+            setFontIdx(fontIdx - 1);
+            applyFontSize();
+            render();
+          };
+          toolbar.appendChild(fontDownBtn);
+
           document.body.appendChild(toolbar);
         }
 
@@ -813,6 +883,7 @@
         });
 
         window.addEventListener('load', function() {
+          applyFontSize();
           render();
           setupScrollObserver();
           observer.observe(document.documentElement, { attributes: true });
