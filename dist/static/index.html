@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/claude-icon.png" />
+    <link rel="shortcut icon" type="image/png" href="/claude-icon.png" />
+    <link rel="apple-touch-icon" href="/claude-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Claude Code Web UI</title>
+    <script>
+      // Prevent flash of unstyled content by setting theme class early
+      (function () {
+        const storedTheme = localStorage.getItem("claude-code-webui-theme");
+        let theme = null;
+        try {
+          theme = storedTheme ? JSON.parse(storedTheme) : null;
+        } catch {
+          // If parsing fails, fall back to null
+          theme = null;
+        }
+        
+        if (
+          theme === "dark" ||
+          (!theme && window.matchMedia("(prefers-color-scheme: dark)").matches)
+        ) {
+          document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.remove("dark");
+        }
+      })();
+    </script>
+    <script>
+      // Tab renaming - press F2 or use Tools panel
+      (function() {
+        const params = new URLSearchParams(window.location.search);
+        const nameParam = params.get('name');
+        const storageKey = 'claude-tab-name-' + (nameParam || window.location.pathname);
+        const saved = localStorage.getItem(storageKey);
+        if (nameParam) document.title = nameParam;
+        else if (saved) document.title = saved;
+        window._renameTab = function() {
+          var name = prompt('Rename this tab:', document.title);
+          if (name) { document.title = name; localStorage.setItem(storageKey, name); }
+        };
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'F2') { e.preventDefault(); window._renameTab(); }
+        });
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-4YPRjJF7.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Cy5ryi6l.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Project Directory Sidebar - persistent across tabs via localStorage
+      (function() {
+        var STORAGE_KEY = 'claude-webui-project-dirs';
+        var COLLAPSED_KEY = 'claude-webui-sidebar-collapsed';
+
+        // Items are objects: { type: 'dir', path: '...' } or { type: 'sep' }
+        // Migrate old string[] format
+        function getItems() {
+          try {
+            var raw = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+            if (raw.length && typeof raw[0] === 'string') {
+              // Migrate from old format
+              var migrated = raw.map(function(s) { return { type: 'dir', path: s }; });
+              saveItems(migrated);
+              return migrated;
+            }
+            return raw;
+          } catch { return []; }
+        }
+        function saveItems(items) { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }
+        function isCollapsed() { return localStorage.getItem(COLLAPSED_KEY) === '1'; }
+        function setCollapsed(v) { localStorage.setItem(COLLAPSED_KEY, v ? '1' : '0'); }
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function sendToChat(text) {
+          var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
+                   document.querySelector('textarea[placeholder="Processing..."]');
+          if (!ta) return;
+          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          nativeSetter.call(ta, text);
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.focus();
+          setTimeout(function() {
+            var sendBtn = ta.closest('form') && ta.closest('form').querySelector('button[type="submit"]');
+            if (sendBtn && !sendBtn.disabled) sendBtn.click();
+          }, 50);
+        }
+
+        function showToast(msg) {
+          var t = document.createElement('div');
+          t.textContent = msg;
+          t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:8px;font-size:13px;z-index:100000;transition:opacity 0.3s;pointer-events:none;' +
+            (isDark() ? 'background:#334155;color:#e2e8f0;' : 'background:#1e293b;color:#f1f5f9;');
+          document.body.appendChild(t);
+          setTimeout(function() { t.style.opacity = '0'; }, 1500);
+          setTimeout(function() { t.remove(); }, 1800);
+        }
+
+        function render() {
+          var existing = document.getElementById('proj-sidebar');
+          if (existing) existing.remove();
+          var toggleExisting = document.getElementById('proj-sidebar-toggle');
+          if (toggleExisting) toggleExisting.remove();
+
+          var dark = isDark();
+          var collapsed = isCollapsed();
+
+          // Toggle button
+          var toggleBtn = document.createElement('button');
+          toggleBtn.id = 'proj-sidebar-toggle';
+          toggleBtn.innerHTML = collapsed ? '&#x1F4C1;' : '&#x2715;';
+          toggleBtn.title = collapsed ? 'Open project directories' : 'Close sidebar';
+          toggleBtn.style.cssText = 'position:fixed;top:8px;right:' + (collapsed ? '8px' : '228px') + ';z-index:100001;border:1px solid ' + (dark ? 'rgba(148,163,184,0.3)' : 'rgba(128,128,128,0.3)') + ';border-radius:6px;cursor:pointer;font-size:14px;padding:4px 8px;opacity:0.6;transition:opacity 0.2s,right 0.2s;background:' + (dark ? '#1e293b' : '#fff') + ';color:' + (dark ? '#e2e8f0' : '#334155') + ';';
+          toggleBtn.onmouseenter = function() { toggleBtn.style.opacity = '1'; };
+          toggleBtn.onmouseleave = function() { toggleBtn.style.opacity = '0.6'; };
+          toggleBtn.onclick = function() { setCollapsed(!collapsed); render(); };
+          document.body.appendChild(toggleBtn);
+
+          if (collapsed) return;
+
+          // Sidebar panel
+          var panel = document.createElement('div');
+          panel.id = 'proj-sidebar';
+          panel.style.cssText = 'position:fixed;top:0;right:0;width:220px;height:100vh;z-index:100000;display:flex;flex-direction:column;border-left:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;' +
+            (dark ? 'background:#0f172a;color:#e2e8f0;' : 'background:#f8fafc;color:#1e293b;');
+
+          // Header
+          var header = document.createElement('div');
+          header.style.cssText = 'padding:12px 12px 8px;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:' + (dark ? '#94a3b8' : '#64748b') + ';display:flex;justify-content:space-between;align-items:center;';
+          var headerText = document.createElement('span');
+          headerText.textContent = 'Projects';
+          header.appendChild(headerText);
+
+          // Add separator button
+          var sepBtn = document.createElement('button');
+          sepBtn.textContent = '\u2500';
+          sepBtn.title = 'Add separator';
+          sepBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;font-weight:600;padding:0 4px;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+          sepBtn.onclick = function() {
+            var items = getItems();
+            items.push({ type: 'sep' });
+            saveItems(items);
+            render();
+          };
+          header.appendChild(sepBtn);
+          panel.appendChild(header);
+
+          // Add form
+          var form = document.createElement('div');
+          form.style.cssText = 'padding:0 8px 8px;display:flex;gap:4px;';
+          var input = document.createElement('input');
+          input.type = 'text';
+          input.placeholder = 'C:\\path\\to\\project';
+          input.style.cssText = 'flex:1;min-width:0;padding:5px 8px;border-radius:6px;font-size:12px;border:1px solid ' + (dark ? '#334155' : '#cbd5e1') + ';outline:none;' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;' : 'background:#fff;color:#1e293b;');
+          input.onfocus = function() { input.style.borderColor = '#3b82f6'; };
+          input.onblur = function() { input.style.borderColor = dark ? '#334155' : '#cbd5e1'; };
+          var addBtn = document.createElement('button');
+          addBtn.textContent = '+';
+          addBtn.title = 'Add directory';
+          addBtn.style.cssText = 'padding:4px 10px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;border:none;' +
+            (dark ? 'background:#1d4ed8;color:#fff;' : 'background:#3b82f6;color:#fff;');
+          addBtn.onmouseenter = function() { addBtn.style.opacity = '0.85'; };
+          addBtn.onmouseleave = function() { addBtn.style.opacity = '1'; };
+
+          function addDir() {
+            var val = input.value.trim();
+            if (!val) return;
+            var items = getItems();
+            var exists = items.some(function(it) { return it.type === 'dir' && it.path === val; });
+            if (!exists) {
+              items.push({ type: 'dir', path: val });
+              saveItems(items);
+            }
+            input.value = '';
+            render();
+          }
+          addBtn.onclick = addDir;
+          input.onkeydown = function(e) { if (e.key === 'Enter') addDir(); };
+          form.appendChild(input);
+          form.appendChild(addBtn);
+          panel.appendChild(form);
+
+          // Divider below form
+          var topDivider = document.createElement('div');
+          topDivider.style.cssText = 'height:1px;margin:0 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
+          panel.appendChild(topDivider);
+
+          // Item list (draggable)
+          var dragIdx = null;
+          var list = document.createElement('div');
+          list.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;';
+
+          var items = getItems();
+          if (items.length === 0) {
+            var empty = document.createElement('div');
+            empty.style.cssText = 'padding:16px 12px;text-align:center;font-size:12px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
+            empty.textContent = 'No saved directories';
+            list.appendChild(empty);
+          } else {
+            items.forEach(function(item, idx) {
+              var row = document.createElement('div');
+              row.draggable = true;
+              row.dataset.idx = idx;
+
+              if (item.type === 'sep') {
+                // Separator row
+                row.style.cssText = 'display:flex;align-items:center;padding:4px 8px;margin:1px 4px;gap:4px;transition:opacity 0.15s;';
+
+                var handle = document.createElement('span');
+                handle.textContent = '\u2261';
+                handle.style.cssText = 'cursor:grab;font-size:12px;padding:0 2px;opacity:0.3;color:' + (dark ? '#94a3b8' : '#64748b') + ';flex-shrink:0;user-select:none;';
+                handle.onmouseenter = function() { handle.style.opacity = '0.7'; };
+                handle.onmouseleave = function() { handle.style.opacity = '0.3'; };
+                row.appendChild(handle);
+
+                var line = document.createElement('div');
+                line.style.cssText = 'flex:1;height:1px;' + (dark ? 'background:#334155;' : 'background:#cbd5e1;');
+                row.appendChild(line);
+
+                var delBtn = document.createElement('button');
+                delBtn.innerHTML = '&times;';
+                delBtn.title = 'Remove separator';
+                delBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:14px;padding:0 2px;opacity:0.2;transition:opacity 0.15s;flex-shrink:0;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+                delBtn.onmouseenter = function() { delBtn.style.opacity = '1'; delBtn.style.color = dark ? '#f87171' : '#ef4444'; };
+                delBtn.onmouseleave = function() { delBtn.style.opacity = '0.2'; delBtn.style.color = dark ? '#94a3b8' : '#64748b'; };
+                delBtn.onclick = function(e) {
+                  e.stopPropagation();
+                  var its = getItems();
+                  its.splice(idx, 1);
+                  saveItems(its);
+                  render();
+                };
+                row.appendChild(delBtn);
+              } else {
+                // Directory row
+                row.style.cssText = 'display:flex;align-items:center;padding:6px 8px;margin:1px 4px;border-radius:6px;cursor:pointer;transition:background 0.15s,opacity 0.15s;gap:4px;';
+                row.onmouseenter = function() { row.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+                row.onmouseleave = function() { row.style.background = 'transparent'; };
+
+                var handle = document.createElement('span');
+                handle.textContent = '\u2261';
+                handle.style.cssText = 'cursor:grab;font-size:12px;padding:0 2px;opacity:0.3;color:' + (dark ? '#94a3b8' : '#64748b') + ';flex-shrink:0;user-select:none;';
+                handle.onmouseenter = function() { handle.style.opacity = '0.7'; };
+                handle.onmouseleave = function() { handle.style.opacity = '0.3'; };
+                row.appendChild(handle);
+
+                var parts = item.path.replace(/\\/g, '/').replace(/\/$/, '').split('/');
+                var label = parts[parts.length - 1] || item.path;
+
+                var nameSpan = document.createElement('span');
+                nameSpan.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;';
+                nameSpan.textContent = label;
+                nameSpan.title = item.path + '\nClick to paste: cd ' + item.path;
+                row.appendChild(nameSpan);
+
+                var delBtn = document.createElement('button');
+                delBtn.innerHTML = '&times;';
+                delBtn.title = 'Remove';
+                delBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;opacity:0.3;transition:opacity 0.15s;flex-shrink:0;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+                delBtn.onmouseenter = function() { delBtn.style.opacity = '1'; delBtn.style.color = dark ? '#f87171' : '#ef4444'; };
+                delBtn.onmouseleave = function() { delBtn.style.opacity = '0.3'; delBtn.style.color = dark ? '#94a3b8' : '#64748b'; };
+                delBtn.onclick = function(e) {
+                  e.stopPropagation();
+                  var its = getItems();
+                  its.splice(idx, 1);
+                  saveItems(its);
+                  render();
+                };
+                row.appendChild(delBtn);
+
+                row.onclick = function(e) {
+                  if (e.target === delBtn) return;
+                  sendToChat('cd ' + item.path);
+                };
+              }
+
+              // Drag-and-drop reordering
+              row.ondragstart = function(e) {
+                dragIdx = idx;
+                e.dataTransfer.effectAllowed = 'move';
+                row.style.opacity = '0.4';
+              };
+              row.ondragend = function() {
+                row.style.opacity = '1';
+                dragIdx = null;
+                list.querySelectorAll('[data-idx]').forEach(function(r) {
+                  r.style.borderTop = 'none';
+                  r.style.borderBottom = 'none';
+                });
+              };
+              row.ondragover = function(e) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                var targetIdx = parseInt(row.dataset.idx);
+                list.querySelectorAll('[data-idx]').forEach(function(r) {
+                  r.style.borderTop = 'none';
+                  r.style.borderBottom = 'none';
+                });
+                if (dragIdx !== null && targetIdx !== dragIdx) {
+                  if (targetIdx < dragIdx) row.style.borderTop = '2px solid #3b82f6';
+                  else row.style.borderBottom = '2px solid #3b82f6';
+                }
+              };
+              row.ondrop = function(e) {
+                e.preventDefault();
+                var targetIdx = parseInt(row.dataset.idx);
+                if (dragIdx !== null && dragIdx !== targetIdx) {
+                  var its = getItems();
+                  var moved = its.splice(dragIdx, 1)[0];
+                  its.splice(targetIdx, 0, moved);
+                  saveItems(its);
+                  render();
+                }
+              };
+
+              list.appendChild(row);
+            });
+          }
+          panel.appendChild(list);
+
+          // Footer hint
+          var footer = document.createElement('div');
+          footer.style.cssText = 'padding:8px 12px;font-size:10px;text-align:center;color:' + (dark ? '#475569' : '#94a3b8') + ';border-top:1px solid ' + (dark ? '#1e293b' : '#e2e8f0') + ';';
+          footer.textContent = 'Click to paste cd into chat';
+          panel.appendChild(footer);
+
+          document.body.appendChild(panel);
+        }
+
+        // Watch for dark mode changes
+        var observer = new MutationObserver(function(mutations) {
+          mutations.forEach(function(m) {
+            if (m.attributeName === 'class') render();
+          });
+        });
+
+        window.addEventListener('load', function() {
+          render();
+          observer.observe(document.documentElement, { attributes: true });
+        });
+      })();
+    </script>
+    <script>
+      // Session title - editable name below the session header
+      (function() {
+        var TITLES_KEY = 'claude-webui-session-titles';
+
+        function getTitles() {
+          try { return JSON.parse(localStorage.getItem(TITLES_KEY)) || {}; }
+          catch { return {}; }
+        }
+        function saveTitle(sessionId, title) {
+          var t = getTitles();
+          if (title) t[sessionId] = title; else delete t[sessionId];
+          localStorage.setItem(TITLES_KEY, JSON.stringify(t));
+        }
+
+        function getSessionId() {
+          // Find the "Session: xxxxxxxx..." span in the header
+          var spans = document.querySelectorAll('span');
+          for (var i = 0; i < spans.length; i++) {
+            var text = spans[i].textContent || '';
+            var match = text.match(/Session:\s*([a-f0-9]{8})/);
+            if (match) return match[1];
+          }
+          return null;
+        }
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function injectTitle() {
+          if (document.getElementById('session-title-row')) return;
+          var sessionId = getSessionId();
+          if (!sessionId) return;
+
+          // Find the session span's parent container
+          var spans = document.querySelectorAll('span');
+          var sessionSpan = null;
+          for (var i = 0; i < spans.length; i++) {
+            if ((spans[i].textContent || '').match(/Session:\s*[a-f0-9]{8}/)) {
+              sessionSpan = spans[i];
+              break;
+            }
+          }
+          if (!sessionSpan) return;
+
+          // Walk up to find the header bar container
+          var headerRow = sessionSpan.closest('div');
+          if (!headerRow) return;
+
+          var dark = isDark();
+          var titles = getTitles();
+          var currentTitle = titles[sessionId] || '';
+
+          var row = document.createElement('div');
+          row.id = 'session-title-row';
+          row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:4px;';
+
+          var input = document.createElement('input');
+          input.type = 'text';
+          input.value = currentTitle;
+          input.placeholder = 'Name this session...';
+          input.style.cssText = 'padding:2px 8px;border-radius:5px;font-size:12px;font-weight:500;border:1px solid transparent;outline:none;min-width:120px;max-width:280px;width:' + Math.max(120, (currentTitle.length || 18) * 7.5) + 'px;transition:border-color 0.15s,background 0.15s;' +
+            (dark
+              ? 'background:transparent;color:#94a3b8;'
+              : 'background:transparent;color:#64748b;');
+
+          input.onfocus = function() {
+            input.style.borderColor = dark ? '#3b82f6' : '#3b82f6';
+            input.style.background = dark ? '#1e293b' : '#fff';
+          };
+          input.onblur = function() {
+            input.style.borderColor = 'transparent';
+            input.style.background = 'transparent';
+            var val = input.value.trim();
+            saveTitle(sessionId, val);
+            input.style.width = Math.max(120, (val.length || 18) * 7.5) + 'px';
+          };
+          input.oninput = function() {
+            input.style.width = Math.max(120, (input.value.length || 18) * 7.5) + 'px';
+          };
+          input.onkeydown = function(e) { if (e.key === 'Enter') input.blur(); };
+
+          row.appendChild(input);
+
+          // Insert after the header row
+          headerRow.parentNode.insertBefore(row, headerRow.nextSibling);
+        }
+
+        // Use MutationObserver to detect when session info appears in DOM
+        var obs = new MutationObserver(function() {
+          injectTitle();
+        });
+
+        window.addEventListener('load', function() {
+          obs.observe(document.body, { childList: true, subtree: true });
+          // Initial check
+          setTimeout(injectTitle, 500);
+        });
+      })();
+    </script>
+    <script>
+      // Tools Floater - draggable panel
+      (function() {
+        var CMDS_KEY = 'claude-webui-quick-cmds';
+        var CMDS_COLLAPSED_KEY = 'claude-webui-cmds-collapsed';
+        var POS_KEY = 'claude-webui-tools-pos';
+
+        var DEFAULT_CMDS = [
+          { label: 'Docker Rebuild', cmd: 'docker compose down && docker compose up --build' },
+          { label: 'Git Push', cmd: 'git push' },
+          { label: 'Git Pull', cmd: 'git pull' },
+          { label: 'Git Status', cmd: 'git status' },
+          { label: 'Commit', cmd: '/commit' }
+        ];
+
+        function getCmds() {
+          try {
+            var stored = JSON.parse(localStorage.getItem(CMDS_KEY));
+            return stored && stored.length ? stored : null;
+          } catch { return null; }
+        }
+        function saveCmds(cmds) { localStorage.setItem(CMDS_KEY, JSON.stringify(cmds)); }
+        function isCollapsed() { return localStorage.getItem(CMDS_COLLAPSED_KEY) === '1'; }
+        function setCollapsed(v) { localStorage.setItem(CMDS_COLLAPSED_KEY, v ? '1' : '0'); }
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+        function getPos() {
+          try { return JSON.parse(localStorage.getItem(POS_KEY)) || { top: 40, left: 8 }; }
+          catch { return { top: 40, left: 8 }; }
+        }
+        function savePos(pos) { localStorage.setItem(POS_KEY, JSON.stringify(pos)); }
+
+        function sendToChat(text) {
+          var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
+                   document.querySelector('textarea[placeholder="Processing..."]');
+          if (!ta) return;
+          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          nativeSetter.call(ta, text);
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.focus();
+          setTimeout(function() {
+            var sendBtn = ta.closest('form') && ta.closest('form').querySelector('button[type="submit"]');
+            if (sendBtn && !sendBtn.disabled) sendBtn.click();
+          }, 50);
+        }
+
+        function showToast(msg) {
+          var t = document.createElement('div');
+          t.textContent = msg;
+          var dk = isDark();
+          t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:8px;font-size:13px;z-index:100000;transition:opacity 0.3s;pointer-events:none;' +
+            (dk ? 'background:#334155;color:#e2e8f0;' : 'background:#1e293b;color:#f1f5f9;');
+          document.body.appendChild(t);
+          setTimeout(function() { t.style.opacity = '0'; }, 1200);
+          setTimeout(function() { t.remove(); }, 1500);
+        }
+
+        function render() {
+          var existing = document.getElementById('cmds-floater');
+          if (existing) existing.remove();
+          var toggleExisting = document.getElementById('cmds-floater-toggle');
+          if (toggleExisting) toggleExisting.remove();
+
+          var dark = isDark();
+          var collapsed = isCollapsed();
+          var cmds = getCmds() || DEFAULT_CMDS;
+          var pos = getPos();
+
+          // Toggle button (only shown when collapsed)
+          var toggleBtn = document.createElement('button');
+          toggleBtn.id = 'cmds-floater-toggle';
+          toggleBtn.innerHTML = '&#x26A1;';
+          toggleBtn.title = 'Open tools';
+          toggleBtn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:100001;border:1px solid ' + (dark ? 'rgba(148,163,184,0.3)' : 'rgba(128,128,128,0.3)') + ';border-radius:6px;cursor:pointer;font-size:14px;padding:4px 8px;opacity:0.6;transition:opacity 0.2s;background:' + (dark ? '#1e293b' : '#fff') + ';color:' + (dark ? '#e2e8f0' : '#334155') + ';';
+          toggleBtn.onmouseenter = function() { toggleBtn.style.opacity = '1'; };
+          toggleBtn.onmouseleave = function() { toggleBtn.style.opacity = '0.6'; };
+          toggleBtn.onclick = function() { setCollapsed(false); render(); };
+
+          if (collapsed) {
+            document.body.appendChild(toggleBtn);
+            return;
+          }
+
+          // Panel
+          var panel = document.createElement('div');
+          panel.id = 'cmds-floater';
+          panel.style.cssText = 'position:fixed;top:' + pos.top + 'px;left:' + pos.left + 'px;width:180px;z-index:100000;border-radius:10px;border:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;overflow:visible;box-shadow:0 4px 12px rgba(0,0,0,0.1);' +
+            (dark ? 'background:#0f172a;color:#e2e8f0;' : 'background:#f8fafc;color:#1e293b;');
+
+          // Header (draggable to move panel)
+          var header = document.createElement('div');
+          header.style.cssText = 'padding:10px 12px 6px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:' + (dark ? '#94a3b8' : '#64748b') + ';display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;';
+          var headerText = document.createElement('span');
+          headerText.textContent = 'Tools';
+          header.appendChild(headerText);
+
+          // Panel dragging via header
+          var dragging = false, dragOffX = 0, dragOffY = 0;
+          header.onmousedown = function(e) {
+            if (e.target !== header && e.target !== headerText) return;
+            dragging = true;
+            dragOffX = e.clientX - panel.getBoundingClientRect().left;
+            dragOffY = e.clientY - panel.getBoundingClientRect().top;
+            header.style.cursor = 'grabbing';
+            e.preventDefault();
+          };
+          document.addEventListener('mousemove', function(e) {
+            if (!dragging) return;
+            var newLeft = Math.max(0, Math.min(window.innerWidth - 190, e.clientX - dragOffX));
+            var newTop = Math.max(0, Math.min(window.innerHeight - 100, e.clientY - dragOffY));
+            panel.style.left = newLeft + 'px';
+            panel.style.top = newTop + 'px';
+          });
+          document.addEventListener('mouseup', function() {
+            if (!dragging) return;
+            dragging = false;
+            header.style.cursor = 'grab';
+            savePos({ top: parseInt(panel.style.top), left: parseInt(panel.style.left) });
+          });
+
+          // Header buttons container
+          var headerBtns = document.createElement('div');
+          headerBtns.style.cssText = 'display:flex;gap:4px;align-items:center;';
+
+          // Add command button
+          var editBtn = document.createElement('button');
+          editBtn.textContent = '+';
+          editBtn.title = 'Add command';
+          editBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;font-weight:600;padding:0 2px;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+          editBtn.onclick = function() {
+            var label = prompt('Command label:');
+            if (!label) return;
+            var cmd = prompt('Command to paste:');
+            if (!cmd) return;
+            cmds.push({ label: label, cmd: cmd });
+            saveCmds(cmds);
+            render();
+          };
+          headerBtns.appendChild(editBtn);
+
+          // Close button (inside header)
+          var closeBtn = document.createElement('button');
+          closeBtn.innerHTML = '&times;';
+          closeBtn.title = 'Close tools';
+          closeBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;font-weight:600;padding:0 2px;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+          closeBtn.onclick = function() { setCollapsed(true); render(); };
+          headerBtns.appendChild(closeBtn);
+
+          header.appendChild(headerBtns);
+          panel.appendChild(header);
+
+          // Command list (items draggable to reorder)
+          var dragIdx = null;
+          var list = document.createElement('div');
+          list.style.cssText = 'padding:2px 6px 4px;display:flex;flex-direction:column;gap:2px;';
+
+          cmds.forEach(function(item, idx) {
+            var row = document.createElement('div');
+            row.draggable = true;
+            row.dataset.idx = idx;
+            row.style.cssText = 'display:flex;align-items:center;gap:4px;transition:opacity 0.15s;';
+
+            // Drag handle for reordering
+            var handle = document.createElement('span');
+            handle.textContent = '\u2261';
+            handle.style.cssText = 'cursor:grab;font-size:14px;padding:0 2px;opacity:0.3;color:' + (dark ? '#94a3b8' : '#64748b') + ';flex-shrink:0;user-select:none;';
+            handle.onmouseenter = function() { handle.style.opacity = '0.7'; };
+            handle.onmouseleave = function() { handle.style.opacity = '0.3'; };
+            row.appendChild(handle);
+
+            row.ondragstart = function(e) {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              row.style.opacity = '0.4';
+            };
+            row.ondragend = function() {
+              row.style.opacity = '1';
+              dragIdx = null;
+              list.querySelectorAll('[data-idx]').forEach(function(r) {
+                r.style.borderTop = 'none';
+                r.style.borderBottom = 'none';
+              });
+            };
+            row.ondragover = function(e) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              var targetIdx = parseInt(row.dataset.idx);
+              list.querySelectorAll('[data-idx]').forEach(function(r) {
+                r.style.borderTop = 'none';
+                r.style.borderBottom = 'none';
+              });
+              if (dragIdx !== null && targetIdx !== dragIdx) {
+                if (targetIdx < dragIdx) row.style.borderTop = '2px solid #3b82f6';
+                else row.style.borderBottom = '2px solid #3b82f6';
+              }
+            };
+            row.ondrop = function(e) {
+              e.preventDefault();
+              var targetIdx = parseInt(row.dataset.idx);
+              if (dragIdx !== null && dragIdx !== targetIdx) {
+                var moved = cmds.splice(dragIdx, 1)[0];
+                cmds.splice(targetIdx, 0, moved);
+                saveCmds(cmds);
+                render();
+              }
+            };
+
+            var hotkeyNum = idx + 1;
+
+            var btn = document.createElement('button');
+            btn.innerHTML = '<span style="display:inline-block;min-width:16px;font-size:10px;opacity:0.5;margin-right:4px;">' + (hotkeyNum <= 9 ? hotkeyNum : '') + '</span>' + item.label;
+            btn.title = item.cmd + (hotkeyNum <= 9 ? ' (Alt+' + hotkeyNum + ')' : '');
+            btn.style.cssText = 'flex:1;text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;border:none;transition:background 0.15s;' +
+              (dark ? 'background:#1e293b;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
+            btn.onmouseenter = function() { btn.style.background = dark ? '#334155' : '#cbd5e1'; };
+            btn.onmouseleave = function() { btn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+            btn.onclick = function() {
+              sendToChat(item.cmd);
+              showToast(item.label);
+            };
+            row.appendChild(btn);
+
+            var delBtn = document.createElement('button');
+            delBtn.innerHTML = '&times;';
+            delBtn.title = 'Remove';
+            delBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:14px;padding:0 2px;opacity:0.25;transition:opacity 0.15s;color:' + (dark ? '#94a3b8' : '#64748b') + ';flex-shrink:0;';
+            delBtn.onmouseenter = function() { delBtn.style.opacity = '1'; delBtn.style.color = dark ? '#f87171' : '#ef4444'; };
+            delBtn.onmouseleave = function() { delBtn.style.opacity = '0.25'; delBtn.style.color = dark ? '#94a3b8' : '#64748b'; };
+            delBtn.onclick = function() {
+              cmds.splice(idx, 1);
+              saveCmds(cmds);
+              render();
+            };
+            row.appendChild(delBtn);
+
+            list.appendChild(row);
+          });
+
+          panel.appendChild(list);
+
+          // Divider
+          var divider = document.createElement('div');
+          divider.style.cssText = 'height:1px;margin:2px 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
+          panel.appendChild(divider);
+
+          // Rename Tab tool
+          var toolsRow = document.createElement('div');
+          toolsRow.style.cssText = 'padding:4px 6px;';
+          var renameBtn = document.createElement('button');
+          renameBtn.textContent = 'Rename Tab';
+          renameBtn.title = 'Rename browser tab (F2)';
+          renameBtn.style.cssText = 'width:100%;text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;border:none;transition:background 0.15s;' +
+            (dark ? 'background:#1e293b;color:#a78bfa;' : 'background:#e2e8f0;color:#7c3aed;');
+          renameBtn.onmouseenter = function() { renameBtn.style.background = dark ? '#334155' : '#cbd5e1'; };
+          renameBtn.onmouseleave = function() { renameBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          renameBtn.onclick = function() { if (window._renameTab) window._renameTab(); };
+          toolsRow.appendChild(renameBtn);
+          panel.appendChild(toolsRow);
+
+          // Reset link
+          var resetRow = document.createElement('div');
+          resetRow.style.cssText = 'padding:4px 12px 8px;text-align:center;';
+          var resetLink = document.createElement('button');
+          resetLink.textContent = 'Reset defaults';
+          resetLink.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
+          resetLink.onclick = function() {
+            localStorage.removeItem(CMDS_KEY);
+            render();
+          };
+          resetRow.appendChild(resetLink);
+          panel.appendChild(resetRow);
+
+          document.body.appendChild(panel);
+        }
+
+        // Alt+number hotkeys for commands
+        document.addEventListener('keydown', function(e) {
+          if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
+          var num = parseInt(e.key);
+          if (isNaN(num) || num < 1 || num > 9) return;
+          var tag = document.activeElement && document.activeElement.tagName;
+          if (tag === 'INPUT') return;
+          var cmds = getCmds() || DEFAULT_CMDS;
+          var idx = num - 1;
+          if (idx < cmds.length) {
+            e.preventDefault();
+            sendToChat(cmds[idx].cmd);
+            showToast(cmds[idx].label);
+          }
+        });
+
+        // Watch for dark mode changes
+        var observer = new MutationObserver(function(mutations) {
+          mutations.forEach(function(m) {
+            if (m.attributeName === 'class') render();
+          });
+        });
+
+        window.addEventListener('load', function() {
+          render();
+          observer.observe(document.documentElement, { attributes: true });
+        });
+      })();
+    </script>
+
+    <!-- Auto-approve permissions -->
+    <script>
+      (function() {
+        var autoApproveObserver = new MutationObserver(function(mutations) {
+          // Look for the Permission Required dialog
+          var headings = document.querySelectorAll('h3');
+          for (var i = 0; i < headings.length; i++) {
+            if (headings[i].textContent === 'Permission Required') {
+              var container = headings[i].closest('.flex-shrink-0');
+              if (!container) continue;
+              var buttons = container.querySelectorAll('button');
+              // Find the "Yes, and don't ask again" button (second button, contains "don't ask again")
+              for (var j = 0; j < buttons.length; j++) {
+                var txt = buttons[j].textContent || '';
+                if (txt.indexOf("don't ask again") !== -1 || txt.indexOf("don\u2019t ask again") !== -1) {
+                  console.log('[Auto-approve] Clicking: ' + txt);
+                  buttons[j].click();
+                  return;
+                }
+              }
+              // Fallback: click first button (Yes)
+              if (buttons.length > 0) {
+                console.log('[Auto-approve] Clicking Yes (fallback)');
+                buttons[0].click();
+                return;
+              }
+            }
+          }
+          // Also handle plan mode approval dialogs
+          var planBtns = document.querySelectorAll('button');
+          for (var k = 0; k < planBtns.length; k++) {
+            var ptxt = planBtns[k].textContent || '';
+            if (ptxt.indexOf('Yes, and auto-accept edits') !== -1) {
+              var planContainer = planBtns[k].closest('.flex-shrink-0');
+              if (planContainer && planContainer.querySelector('p')?.textContent?.indexOf('Choose how to proceed') !== -1) {
+                console.log('[Auto-approve] Clicking: ' + ptxt);
+                planBtns[k].click();
+                return;
+              }
+            }
+          }
+        });
+
+        window.addEventListener('load', function() {
+          autoApproveObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>
