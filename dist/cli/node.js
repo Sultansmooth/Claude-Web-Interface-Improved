@@ -2161,8 +2161,14 @@ async function handleConversationRequest(c) {
 }
 
 // handlers/chat.ts
-import { query } from "@anthropic-ai/claude-code";
-async function* executeClaudeCommand(message, requestId, requestAbortControllers, cliPath, sessionId, allowedTools, workingDirectory, permissionMode) {
+import { query, tool as sdkTool, createSdkMcpServer } from "@anthropic-ai/claude-code";
+import { z } from "zod";
+
+// Global map: requestId -> Map<questionId, resolve>
+var globalPendingAnswers = /* @__PURE__ */ new Map();
+var questionIdCounter = 0;
+
+async function* executeClaudeCommand(message, requestId, requestAbortControllers, cliPath, sessionId, allowedTools, workingDirectory, permissionMode, injectMessage) {
   let abortController;
   try {
     let processedMessage = message;
@@ -2171,6 +2177,62 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
     }
     abortController = new AbortController();
     requestAbortControllers.set(requestId, abortController);
+
+    // Per-request resolvers for pending questions
+    const pendingResolvers = new Map();
+    globalPendingAnswers.set(requestId, pendingResolvers);
+
+    // Create SDK MCP server with AskUser tool
+    const askUserMcp = createSdkMcpServer({
+      name: "ask-user-webui",
+      tools: [
+        sdkTool(
+          "AskUserQuestion",
+          "Ask the user a question with multiple-choice options. Use this when you need clarification, want the user to choose between approaches, or need input to proceed. Each question can have 2-4 options. The user can also provide free-text input via an 'Other' option that is always available.",
+          {
+            questions: z.array(z.object({
+              question: z.string().describe("The question to ask"),
+              header: z.string().describe("Short label for the question (max 12 chars)"),
+              options: z.array(z.object({
+                label: z.string().describe("Display text for this option (1-5 words)"),
+                description: z.string().describe("Explanation of what this option means")
+              })).min(2).max(4),
+              multiSelect: z.boolean().describe("Whether multiple options can be selected")
+            })).min(1).max(4)
+          },
+          async (args) => {
+            const questionId = "q_" + (++questionIdCounter);
+            logger.chat.debug("AskUserQuestion MCP tool called, questionId: " + questionId);
+
+            // Create deferred promise for the user's answer
+            let resolveAnswer;
+            const answerPromise = new Promise((resolve) => { resolveAnswer = resolve; });
+            pendingResolvers.set(questionId, resolveAnswer);
+
+            // Inject the question into the NDJSON stream for the frontend
+            if (injectMessage) {
+              injectMessage({
+                type: "ask_user_question",
+                questionId,
+                requestId,
+                questions: args.questions || []
+              });
+            }
+
+            // Wait for the user's answer (resolved by /api/answer endpoint)
+            const answers = await answerPromise;
+            pendingResolvers.delete(questionId);
+            logger.chat.debug("AskUserQuestion answered, questionId: " + questionId);
+
+            // Return answers as tool result
+            return {
+              content: [{ type: "text", text: JSON.stringify(answers) }]
+            };
+          }
+        )
+      ]
+    });
+
     for await (const sdkMessage of query({
       prompt: processedMessage,
       options: {
@@ -2179,7 +2241,8 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
         permissionMode: "bypassPermissions",
         ...sessionId ? { resume: sessionId } : {},
         ...workingDirectory ? { cwd: workingDirectory } : {},
-        allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"]
+        allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
+        mcpServers: { "ask-user-webui": askUserMcp }
       }
     })) {
       logger.chat.debug("Claude SDK Message: {sdkMessage}", { sdkMessage });
@@ -2201,6 +2264,7 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
     if (requestAbortControllers.has(requestId)) {
       requestAbortControllers.delete(requestId);
     }
+    globalPendingAnswers.delete(requestId);
   }
 }
 async function handleChatRequest(c, requestAbortControllers) {
@@ -2212,17 +2276,26 @@ async function handleChatRequest(c, requestAbortControllers) {
   );
   const stream = new ReadableStream({
     async start(controller) {
+      // injectMessage callback: push data into the NDJSON stream from MCP tool handler
+      const injectMessage = (msg) => {
+        try {
+          const data = JSON.stringify(msg) + "\n";
+          controller.enqueue(new TextEncoder().encode(data));
+        } catch (e) {
+          logger.chat.error("Failed to inject message: {e}", { e });
+        }
+      };
       try {
         for await (const chunk of executeClaudeCommand(
           chatRequest.message,
           chatRequest.requestId,
           requestAbortControllers,
           cliPath,
-          // Use detected CLI path from validateClaudeCli
           chatRequest.sessionId,
           chatRequest.allowedTools,
           chatRequest.workingDirectory,
-          chatRequest.permissionMode
+          chatRequest.permissionMode,
+          injectMessage
         )) {
           const data = JSON.stringify(chunk) + "\n";
           controller.enqueue(new TextEncoder().encode(data));
@@ -2304,6 +2377,72 @@ function createApp(runtime2, config) {
     (c) => handleAbortRequest(c, requestAbortControllers)
   );
   app.post("/api/chat", (c) => handleChatRequest(c, requestAbortControllers));
+  // Docs discovery endpoint
+  app.get("/api/docs", async (c) => {
+    const dir = c.req.query("dir");
+    if (!dir) return c.json({ error: "dir parameter required" }, 400);
+    const docFolders = ["docs", "doc", "documents", "documentation"];
+    const docExtensions = [".md", ".txt", ".pdf", ".rst", ".adoc", ".html", ".htm"];
+    var results = [];
+    for (const folder of docFolders) {
+      const folderPath = join(dir, folder);
+      if (await exists(folderPath)) {
+        try {
+          const s = await stat(folderPath);
+          if (!s.isDirectory) continue;
+          async function scanDir(dirPath, prefix) {
+            for await (const entry of readDir(dirPath)) {
+              const entryPath = join(dirPath, entry.name);
+              if (entry.isDirectory) {
+                await scanDir(entryPath, prefix + entry.name + "/");
+              } else if (entry.isFile) {
+                const ext = entry.name.toLowerCase().slice(entry.name.lastIndexOf("."));
+                if (docExtensions.includes(ext)) {
+                  results.push({ folder: folder, name: prefix + entry.name, path: entryPath });
+                }
+              }
+            }
+          }
+          await scanDir(folderPath, "");
+        } catch(e) {}
+      }
+    }
+    // Also check for root-level doc files (README, CLAUDE.md, etc.)
+    try {
+      for await (const entry of readDir(dir)) {
+        if (entry.isFile) {
+          const lower = entry.name.toLowerCase();
+          if (lower === "readme.md" || lower === "claude.md" || lower === "contributing.md" || lower === "changelog.md" || lower === "license" || lower === "license.md") {
+            results.push({ folder: "root", name: entry.name, path: join(dir, entry.name) });
+          }
+        }
+      }
+    } catch(e) {}
+    return c.json(results);
+  });
+  // Read a doc file
+  app.get("/api/docs/read", async (c) => {
+    const filePath = c.req.query("path");
+    if (!filePath) return c.json({ error: "path parameter required" }, 400);
+    try {
+      const content = await readTextFile(filePath);
+      return c.json({ content: content });
+    } catch(e) {
+      return c.json({ error: "Could not read file" }, 404);
+    }
+  });
+  // Endpoint for frontend to submit answers to AskUserQuestion
+  app.post("/api/answer/:requestId", async (c) => {
+    const requestId = c.req.param("requestId");
+    const { questionId, answers } = await c.req.json();
+    logger.api.debug(`Answer received for request: ${requestId}, question: ${questionId}`);
+    const resolvers = globalPendingAnswers.get(requestId);
+    if (resolvers && resolvers.has(questionId)) {
+      resolvers.get(questionId)(answers);
+      return c.json({ success: true });
+    }
+    return c.json({ error: "Question not found or already answered" }, 404);
+  });
   const serveStatic2 = runtime2.createStaticFileMiddleware({
     root: config.staticPath
   });
