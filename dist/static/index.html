@@ -1167,7 +1167,7 @@
           } catch(e) {}
         }
 
-        // --- Job Queue Engine ---
+        // --- Job Queue Engine (Multi-Plan) ---
         // sendToChat helper (duplicated since the sidebar's version is scoped)
         function sendToChat(text) {
           var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
@@ -1183,53 +1183,87 @@
           }, 50);
         }
 
-        function getJobQueue() {
-          try { return JSON.parse(localStorage.getItem(JOB_QUEUE_KEY)) || { jobs: [] }; }
-          catch(e) { return { jobs: [] }; }
+        // Plans stored in localStorage (shared across tabs)
+        // { plans: [ { id, name, jobs: [{ prompt, status }] } ] }
+        function getAllPlans() {
+          try { return JSON.parse(localStorage.getItem(JOB_QUEUE_KEY)) || { plans: [] }; }
+          catch(e) { return { plans: [] }; }
         }
-        function saveJobQueue(q) { localStorage.setItem(JOB_QUEUE_KEY, JSON.stringify(q)); }
+        function saveAllPlans(data) { localStorage.setItem(JOB_QUEUE_KEY, JSON.stringify(data)); }
+        function getPlan(planId) {
+          var data = getAllPlans();
+          for (var i = 0; i < data.plans.length; i++) {
+            if (data.plans[i].id === planId) return data.plans[i];
+          }
+          return null;
+        }
+        function savePlan(plan) {
+          var data = getAllPlans();
+          for (var i = 0; i < data.plans.length; i++) {
+            if (data.plans[i].id === plan.id) { data.plans[i] = plan; saveAllPlans(data); return; }
+          }
+          data.plans.push(plan);
+          saveAllPlans(data);
+        }
+        function deletePlan(planId) {
+          var data = getAllPlans();
+          data.plans = data.plans.filter(function(p) { return p.id !== planId; });
+          saveAllPlans(data);
+          if (getActivePlanId() === planId) setActivePlanId('');
+          if (getSelectedPlanId() === planId) setSelectedPlanId('');
+        }
+        function genPlanId() { return 'plan_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5); }
+
+        // Active plan for THIS tab (sessionStorage = per-tab)
+        function getActivePlanId() { return sessionStorage.getItem('claude-webui-active-plan') || ''; }
+        function setActivePlanId(id) { sessionStorage.setItem('claude-webui-active-plan', id); }
+        // Selected plan in panel (for viewing/editing)
+        function getSelectedPlanId() { return sessionStorage.getItem('claude-webui-selected-plan') || ''; }
+        function setSelectedPlanId(id) { sessionStorage.setItem('claude-webui-selected-plan', id); }
 
         var jobQueueRunning = false;
         var jobQueueWaitingForStart = false;
 
-        function startJobQueue() {
+        function startPlan(planId) {
+          setActivePlanId(planId);
           jobQueueRunning = true;
           runNextJob();
         }
-        function pauseJobQueue() {
+        function pausePlan() {
           jobQueueRunning = false;
-          updateJobQueuePanel();
-        }
-        function clearJobQueue() {
-          jobQueueRunning = false;
-          saveJobQueue({ jobs: [] });
+          setActivePlanId('');
           updateJobQueuePanel();
         }
         function runNextJob() {
           if (!jobQueueRunning) { updateJobQueuePanel(); return; }
-          var q = getJobQueue();
+          var planId = getActivePlanId();
+          var plan = planId ? getPlan(planId) : null;
+          if (!plan) { jobQueueRunning = false; updateJobQueuePanel(); return; }
           var nextJob = null;
-          for (var i = 0; i < q.jobs.length; i++) {
-            if (q.jobs[i].status === 'pending') { nextJob = q.jobs[i]; break; }
+          for (var i = 0; i < plan.jobs.length; i++) {
+            if (plan.jobs[i].status === 'pending') { nextJob = plan.jobs[i]; break; }
           }
           if (!nextJob) {
             jobQueueRunning = false;
+            setActivePlanId('');
             updateJobQueuePanel();
             if (isNotifyEnabled()) playNotifySound();
             return;
           }
           nextJob.status = 'running';
-          saveJobQueue(q);
+          savePlan(plan);
           updateJobQueuePanel();
           sendToChat(nextJob.prompt);
           jobQueueWaitingForStart = true;
         }
         function onJobComplete() {
-          var q = getJobQueue();
-          for (var i = 0; i < q.jobs.length; i++) {
-            if (q.jobs[i].status === 'running') { q.jobs[i].status = 'done'; break; }
+          var planId = getActivePlanId();
+          var plan = planId ? getPlan(planId) : null;
+          if (!plan) return;
+          for (var i = 0; i < plan.jobs.length; i++) {
+            if (plan.jobs[i].status === 'running') { plan.jobs[i].status = 'done'; break; }
           }
-          saveJobQueue(q);
+          savePlan(plan);
           updateJobQueuePanel();
           if (jobQueueRunning) {
             setTimeout(runNextJob, 1500);
@@ -1428,7 +1462,7 @@
           }
         });
 
-        // --- Job Queue Panel ---
+        // --- Job Queue Panel (Multi-Plan) ---
         var jobQueuePanelVisible = false;
         function toggleJobQueuePanel() {
           jobQueuePanelVisible = !jobQueuePanelVisible;
@@ -1439,21 +1473,23 @@
           if (existing) existing.remove();
           if (!jobQueuePanelVisible) return;
           var dark = isDark();
-          var q = getJobQueue();
+          var data = getAllPlans();
+          var selId = getSelectedPlanId();
+          var selPlan = selId ? getPlan(selId) : null;
+          var actId = getActivePlanId();
+          var btnCss = 'border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;padding:6px 12px;';
 
           var panel = document.createElement('div');
           panel.id = 'job-queue-panel';
-          panel.style.cssText = 'position:fixed;right:0;top:0;bottom:0;width:400px;z-index:100001;display:flex;flex-direction:column;border-left:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:-4px 0 16px rgba(0,0,0,0.2);' +
+          panel.style.cssText = 'position:fixed;right:0;top:0;bottom:0;width:420px;z-index:100001;display:flex;flex-direction:column;border-left:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';box-shadow:-4px 0 16px rgba(0,0,0,0.2);' +
             (dark ? 'background:#0f172a;color:#e2e8f0;' : 'background:#f8fafc;color:#1e293b;');
 
           // Header
           var hdr = document.createElement('div');
-          hdr.style.cssText = 'padding:16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;align-items:center;justify-content:space-between;flex-shrink:0;';
+          hdr.style.cssText = 'padding:14px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;align-items:center;justify-content:space-between;flex-shrink:0;';
           var ttl = document.createElement('div');
           ttl.style.cssText = 'font-size:15px;font-weight:600;';
-          var dc = 0;
-          for (var i = 0; i < q.jobs.length; i++) { if (q.jobs[i].status === 'done') dc++; }
-          ttl.textContent = 'Job Queue' + (q.jobs.length > 0 ? ' (' + dc + '/' + q.jobs.length + ')' : '');
+          ttl.textContent = 'Job Queue';
           hdr.appendChild(ttl);
           var xBtn = document.createElement('button');
           xBtn.innerHTML = '&times;';
@@ -1462,134 +1498,219 @@
           hdr.appendChild(xBtn);
           panel.appendChild(hdr);
 
-          // Add job input
-          var addRow = document.createElement('div');
-          addRow.style.cssText = 'padding:12px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';flex-shrink:0;';
-          var jobInput = document.createElement('textarea');
-          jobInput.placeholder = 'Enter job prompt...';
-          jobInput.style.cssText = 'width:100%;min-height:60px;padding:8px;border:1px solid ' + (dark ? '#334155' : '#cbd5e1') + ';border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;' +
-            (dark ? 'background:#1e293b;color:#e2e8f0;' : 'background:#fff;color:#1e293b;');
-          addRow.appendChild(jobInput);
-          var addBtnRow = document.createElement('div');
-          addBtnRow.style.cssText = 'margin-top:8px;';
-          var addBtn = document.createElement('button');
-          addBtn.textContent = '+ Add Job';
-          addBtn.style.cssText = 'padding:6px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;' +
+          // Plan list / selector
+          var planBar = document.createElement('div');
+          planBar.style.cssText = 'padding:10px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';flex-shrink:0;';
+          var planRow = document.createElement('div');
+          planRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;';
+          data.plans.forEach(function(p) {
+            var isSel = p.id === selId;
+            var isAct = p.id === actId && jobQueueRunning;
+            var chip = document.createElement('button');
+            chip.style.cssText = btnCss + 'padding:4px 10px;font-size:12px;' +
+              (isSel ? 'background:#3b82f6;color:#fff;' :
+               (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;')) +
+              (isAct && !isSel ? 'border-color:#3b82f6;' : '');
+            var dc = 0, tc = p.jobs.length;
+            for (var j = 0; j < tc; j++) { if (p.jobs[j].status === 'done') dc++; }
+            chip.textContent = p.name + (tc > 0 ? ' (' + dc + '/' + tc + ')' : '') + (isAct ? ' \u25B6' : '');
+            (function(pid) { chip.onclick = function() { setSelectedPlanId(pid); updateJobQueuePanel(); }; })(p.id);
+            planRow.appendChild(chip);
+          });
+          // New plan button
+          var newBtn = document.createElement('button');
+          newBtn.textContent = '+';
+          newBtn.title = 'Create new plan';
+          newBtn.style.cssText = btnCss + 'padding:4px 10px;font-size:14px;font-weight:700;' +
             (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
-          addBtn.onclick = function() {
-            var text = jobInput.value.trim();
-            if (!text) return;
-            var q2 = getJobQueue();
-            q2.jobs.push({ prompt: text, status: 'pending' });
-            saveJobQueue(q2);
-            jobInput.value = '';
+          newBtn.onclick = function() {
+            var name = prompt('Plan name:');
+            if (!name || !name.trim()) return;
+            var np = { id: genPlanId(), name: name.trim(), jobs: [] };
+            savePlan(np);
+            setSelectedPlanId(np.id);
             updateJobQueuePanel();
           };
-          addBtnRow.appendChild(addBtn);
-          addRow.appendChild(addBtnRow);
-          panel.appendChild(addRow);
+          planRow.appendChild(newBtn);
+          planBar.appendChild(planRow);
+          panel.appendChild(planBar);
 
-          // Job list
-          var listWrap = document.createElement('div');
-          listWrap.style.cssText = 'flex:1;overflow-y:auto;padding:8px 16px;';
-          if (q.jobs.length === 0) {
-            var empty = document.createElement('div');
-            empty.style.cssText = 'text-align:center;padding:32px 0;opacity:0.4;font-size:13px;';
-            empty.textContent = 'No jobs yet. Add prompts above.';
-            listWrap.appendChild(empty);
-          }
-          q.jobs.forEach(function(job, idx) {
-            var isRun = job.status === 'running';
-            var isDn = job.status === 'done';
-            var card = document.createElement('div');
-            card.style.cssText = 'padding:10px 12px;margin-bottom:6px;border-radius:8px;border:1px solid ' +
-              (isRun ? '#3b82f6' : (dark ? '#334155' : '#e2e8f0')) +
-              ';display:flex;align-items:flex-start;gap:10px;' +
-              (isRun ? (dark ? 'background:#1e3a5f;' : 'background:#eff6ff;') : (dark ? 'background:#1e293b;' : 'background:#fff;')) +
-              (isDn ? 'opacity:0.45;' : '');
+          // Selected plan content
+          if (!selPlan) {
+            var noSel = document.createElement('div');
+            noSel.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;opacity:0.4;font-size:13px;';
+            noSel.textContent = data.plans.length === 0 ? 'Click + to create a plan' : 'Select a plan above';
+            panel.appendChild(noSel);
+          } else {
+            // Plan header with name + controls
+            var planHdr = document.createElement('div');
+            planHdr.style.cssText = 'padding:10px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;align-items:center;gap:8px;flex-shrink:0;';
+            var planName = document.createElement('div');
+            planName.style.cssText = 'flex:1;font-size:14px;font-weight:600;';
+            planName.textContent = selPlan.name;
+            planHdr.appendChild(planName);
+            // Rename
+            var renBtn = document.createElement('button');
+            renBtn.textContent = 'Rename';
+            renBtn.style.cssText = btnCss + 'font-size:11px;padding:3px 8px;' + (dark ? 'background:#334155;color:#94a3b8;' : 'background:#e2e8f0;color:#64748b;');
+            (function(pid) { renBtn.onclick = function() {
+              var nn = prompt('New name:', selPlan.name);
+              if (!nn || !nn.trim()) return;
+              var p = getPlan(pid); if (p) { p.name = nn.trim(); savePlan(p); updateJobQueuePanel(); }
+            }; })(selPlan.id);
+            planHdr.appendChild(renBtn);
+            // Delete plan
+            var delPBtn = document.createElement('button');
+            delPBtn.textContent = 'Delete';
+            delPBtn.style.cssText = btnCss + 'font-size:11px;padding:3px 8px;' + (dark ? 'background:#334155;color:#f87171;' : 'background:#fee2e2;color:#ef4444;');
+            (function(pid) { delPBtn.onclick = function() {
+              if (!confirm('Delete plan "' + selPlan.name + '"?')) return;
+              if (actId === pid) pausePlan();
+              deletePlan(pid);
+              updateJobQueuePanel();
+            }; })(selPlan.id);
+            planHdr.appendChild(delPBtn);
+            panel.appendChild(planHdr);
 
-            var ic = document.createElement('div');
-            ic.style.cssText = 'flex-shrink:0;width:22px;text-align:center;font-size:13px;padding-top:2px;font-weight:600;' +
-              (isRun ? 'color:#3b82f6;' : isDn ? 'color:#22c55e;' : (dark ? 'color:#64748b;' : 'color:#94a3b8;'));
-            ic.textContent = isDn ? '\u2713' : isRun ? '\u25B6' : (idx + 1);
-            card.appendChild(ic);
+            // Add job input
+            var addRow = document.createElement('div');
+            addRow.style.cssText = 'padding:10px 16px;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';flex-shrink:0;';
+            var jobInput = document.createElement('textarea');
+            jobInput.placeholder = 'Enter job prompt...';
+            jobInput.style.cssText = 'width:100%;min-height:50px;padding:8px;border:1px solid ' + (dark ? '#334155' : '#cbd5e1') + ';border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;' +
+              (dark ? 'background:#1e293b;color:#e2e8f0;' : 'background:#fff;color:#1e293b;');
+            addRow.appendChild(jobInput);
+            var addBtnRow = document.createElement('div');
+            addBtnRow.style.cssText = 'margin-top:6px;';
+            var addBtn = document.createElement('button');
+            addBtn.textContent = '+ Add Job';
+            addBtn.style.cssText = btnCss + (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
+            (function(pid) { addBtn.onclick = function() {
+              var text = jobInput.value.trim();
+              if (!text) return;
+              var p = getPlan(pid); if (!p) return;
+              p.jobs.push({ prompt: text, status: 'pending' });
+              savePlan(p);
+              jobInput.value = '';
+              updateJobQueuePanel();
+            }; })(selPlan.id);
+            addBtnRow.appendChild(addBtn);
+            addRow.appendChild(addBtnRow);
+            panel.appendChild(addRow);
 
-            var pt = document.createElement('div');
-            pt.style.cssText = 'flex:1;font-size:13px;line-height:1.4;word-break:break-word;' +
-              (job.prompt.length > 120 ? 'max-height:3.6em;overflow:hidden;' : '');
-            pt.textContent = job.prompt;
-            pt.title = job.prompt;
-            card.appendChild(pt);
+            // Job list
+            var listWrap = document.createElement('div');
+            listWrap.style.cssText = 'flex:1;overflow-y:auto;padding:8px 16px;';
+            if (selPlan.jobs.length === 0) {
+              var empty = document.createElement('div');
+              empty.style.cssText = 'text-align:center;padding:32px 0;opacity:0.4;font-size:13px;';
+              empty.textContent = 'No jobs yet. Add prompts above.';
+              listWrap.appendChild(empty);
+            }
+            var isThisPlanRunning = jobQueueRunning && actId === selPlan.id;
+            selPlan.jobs.forEach(function(job, idx) {
+              var isRun = job.status === 'running';
+              var isDn = job.status === 'done';
+              var card = document.createElement('div');
+              card.style.cssText = 'padding:10px 12px;margin-bottom:6px;border-radius:8px;border:1px solid ' +
+                (isRun ? '#3b82f6' : (dark ? '#334155' : '#e2e8f0')) +
+                ';display:flex;align-items:flex-start;gap:10px;' +
+                (isRun ? (dark ? 'background:#1e3a5f;' : 'background:#eff6ff;') : (dark ? 'background:#1e293b;' : 'background:#fff;')) +
+                (isDn ? 'opacity:0.45;' : '');
 
-            if (job.status === 'pending' && !jobQueueRunning) {
+              var ic = document.createElement('div');
+              ic.style.cssText = 'flex-shrink:0;width:22px;text-align:center;font-size:13px;padding-top:2px;font-weight:600;' +
+                (isRun ? 'color:#3b82f6;' : isDn ? 'color:#22c55e;' : (dark ? 'color:#64748b;' : 'color:#94a3b8;'));
+              ic.textContent = isDn ? '\u2713' : isRun ? '\u25B6' : (idx + 1);
+              card.appendChild(ic);
+
+              var pt = document.createElement('div');
+              pt.style.cssText = 'flex:1;font-size:13px;line-height:1.4;word-break:break-word;' +
+                (job.prompt.length > 120 ? 'max-height:3.6em;overflow:hidden;' : '');
+              pt.textContent = job.prompt;
+              pt.title = job.prompt;
+              card.appendChild(pt);
+
               var bw = document.createElement('div');
               bw.style.cssText = 'display:flex;gap:2px;flex-shrink:0;align-items:center;';
-              if (idx > 0 && q.jobs[idx - 1].status === 'pending') {
-                var ub = document.createElement('button');
-                ub.textContent = '\u25B2'; ub.title = 'Move up';
-                ub.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
-                ub.onmouseenter = function() { this.style.opacity = '1'; };
-                ub.onmouseleave = function() { this.style.opacity = '0.4'; };
-                (function(i) { ub.onclick = function() {
-                  var q2 = getJobQueue(); var t = q2.jobs[i]; q2.jobs[i] = q2.jobs[i-1]; q2.jobs[i-1] = t;
-                  saveJobQueue(q2); updateJobQueuePanel();
-                }; })(idx);
-                bw.appendChild(ub);
+              if (job.status === 'pending' && !isThisPlanRunning) {
+                if (idx > 0 && selPlan.jobs[idx - 1].status === 'pending') {
+                  var ub = document.createElement('button');
+                  ub.textContent = '\u25B2'; ub.title = 'Move up';
+                  ub.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
+                  ub.onmouseenter = function() { this.style.opacity = '1'; };
+                  ub.onmouseleave = function() { this.style.opacity = '0.4'; };
+                  (function(pid, i) { ub.onclick = function() {
+                    var p = getPlan(pid); if (!p) return;
+                    var t = p.jobs[i]; p.jobs[i] = p.jobs[i-1]; p.jobs[i-1] = t;
+                    savePlan(p); updateJobQueuePanel();
+                  }; })(selPlan.id, idx);
+                  bw.appendChild(ub);
+                }
+                if (idx < selPlan.jobs.length - 1 && selPlan.jobs[idx + 1].status === 'pending') {
+                  var db = document.createElement('button');
+                  db.textContent = '\u25BC'; db.title = 'Move down';
+                  db.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
+                  db.onmouseenter = function() { this.style.opacity = '1'; };
+                  db.onmouseleave = function() { this.style.opacity = '0.4'; };
+                  (function(pid, i) { db.onclick = function() {
+                    var p = getPlan(pid); if (!p) return;
+                    var t = p.jobs[i]; p.jobs[i] = p.jobs[i+1]; p.jobs[i+1] = t;
+                    savePlan(p); updateJobQueuePanel();
+                  }; })(selPlan.id, idx);
+                  bw.appendChild(db);
+                }
               }
-              if (idx < q.jobs.length - 1 && q.jobs[idx + 1].status === 'pending') {
-                var db = document.createElement('button');
-                db.textContent = '\u25BC'; db.title = 'Move down';
-                db.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;padding:2px;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : '');
-                db.onmouseenter = function() { this.style.opacity = '1'; };
-                db.onmouseleave = function() { this.style.opacity = '0.4'; };
-                (function(i) { db.onclick = function() {
-                  var q2 = getJobQueue(); var t = q2.jobs[i]; q2.jobs[i] = q2.jobs[i+1]; q2.jobs[i+1] = t;
-                  saveJobQueue(q2); updateJobQueuePanel();
-                }; })(idx);
-                bw.appendChild(db);
+              if (job.status !== 'running') {
+                var dl = document.createElement('button');
+                dl.innerHTML = '&times;'; dl.title = 'Remove';
+                dl.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;padding:0 2px;opacity:0.3;' + (dark ? 'color:#e2e8f0;' : '');
+                dl.onmouseenter = function() { this.style.opacity = '1'; this.style.color = '#ef4444'; };
+                dl.onmouseleave = function() { this.style.opacity = '0.3'; this.style.color = dark ? '#e2e8f0' : ''; };
+                (function(pid, i) { dl.onclick = function() {
+                  var p = getPlan(pid); if (!p) return;
+                  p.jobs.splice(i, 1); savePlan(p); updateJobQueuePanel();
+                }; })(selPlan.id, idx);
+                bw.appendChild(dl);
               }
-              var dl = document.createElement('button');
-              dl.innerHTML = '&times;'; dl.title = 'Remove';
-              dl.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;padding:0 2px;opacity:0.3;' + (dark ? 'color:#e2e8f0;' : '');
-              dl.onmouseenter = function() { this.style.opacity = '1'; this.style.color = '#ef4444'; };
-              dl.onmouseleave = function() { this.style.opacity = '0.3'; this.style.color = dark ? '#e2e8f0' : ''; };
-              (function(i) { dl.onclick = function() {
-                var q2 = getJobQueue(); q2.jobs.splice(i, 1); saveJobQueue(q2); updateJobQueuePanel();
-              }; })(idx);
-              bw.appendChild(dl);
               card.appendChild(bw);
-            }
-            listWrap.appendChild(card);
-          });
-          panel.appendChild(listWrap);
+              listWrap.appendChild(card);
+            });
+            panel.appendChild(listWrap);
 
-          // Bottom controls
-          var ctrls = document.createElement('div');
-          ctrls.style.cssText = 'padding:12px 16px;border-top:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;gap:8px;flex-shrink:0;';
-          var hasPending = q.jobs.some(function(j) { return j.status === 'pending'; });
-          if (!jobQueueRunning && hasPending) {
-            var stBtn = document.createElement('button');
-            stBtn.textContent = '\u25B6 Start Queue';
-            stBtn.style.cssText = 'flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#3b82f6;color:#fff;';
-            stBtn.onclick = function() { startJobQueue(); updateJobQueuePanel(); };
-            ctrls.appendChild(stBtn);
+            // Bottom controls
+            var ctrls = document.createElement('div');
+            ctrls.style.cssText = 'padding:12px 16px;border-top:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';display:flex;gap:8px;flex-shrink:0;';
+            var hasPending = selPlan.jobs.some(function(j) { return j.status === 'pending'; });
+            if (!isThisPlanRunning && hasPending) {
+              var stBtn = document.createElement('button');
+              stBtn.textContent = '\u25B6 Start';
+              stBtn.style.cssText = 'flex:1;padding:8px;' + btnCss + 'background:#3b82f6;color:#fff;';
+              (function(pid) { stBtn.onclick = function() { startPlan(pid); updateJobQueuePanel(); }; })(selPlan.id);
+              ctrls.appendChild(stBtn);
+            }
+            if (isThisPlanRunning) {
+              var paBtn = document.createElement('button');
+              paBtn.textContent = '\u23F8 Pause';
+              paBtn.style.cssText = 'flex:1;padding:8px;' + btnCss + 'background:#f59e0b;color:#fff;';
+              paBtn.onclick = function() { pausePlan(); };
+              ctrls.appendChild(paBtn);
+            }
+            if (selPlan.jobs.length > 0) {
+              var rstBtn = document.createElement('button');
+              rstBtn.textContent = 'Reset';
+              rstBtn.title = 'Reset all jobs to pending';
+              rstBtn.style.cssText = 'padding:8px 12px;' + btnCss + (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
+              (function(pid) { rstBtn.onclick = function() {
+                var p = getPlan(pid); if (!p) return;
+                if (actId === pid) pausePlan();
+                p.jobs.forEach(function(j) { j.status = 'pending'; });
+                savePlan(p); updateJobQueuePanel();
+              }; })(selPlan.id);
+              ctrls.appendChild(rstBtn);
+            }
+            panel.appendChild(ctrls);
           }
-          if (jobQueueRunning) {
-            var paBtn = document.createElement('button');
-            paBtn.textContent = '\u23F8 Pause';
-            paBtn.style.cssText = 'flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#f59e0b;color:#fff;';
-            paBtn.onclick = function() { pauseJobQueue(); };
-            ctrls.appendChild(paBtn);
-          }
-          if (q.jobs.length > 0) {
-            var clBtn = document.createElement('button');
-            clBtn.textContent = 'Clear';
-            clBtn.style.cssText = 'padding:8px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;' +
-              (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#e2e8f0;color:#1e293b;');
-            clBtn.onclick = function() { if (confirm('Clear all jobs?')) clearJobQueue(); };
-            ctrls.appendChild(clBtn);
-          }
-          panel.appendChild(ctrls);
           document.body.appendChild(panel);
         }
 
