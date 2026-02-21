@@ -739,6 +739,9 @@
             document.body.appendChild(chip);
           }
           var dark = isDark();
+          // Shift down if restore badge is showing
+          var badge = document.getElementById('session-restored-badge');
+          chip.style.top = badge ? '36px' : '6px';
           chip.style.display = 'block';
           chip.style.background = dark ? '#1e293b' : '#f1f5f9';
           chip.style.color = dark ? '#94a3b8' : '#64748b';
@@ -1134,6 +1137,21 @@
         }
 
         // --- Job Queue Engine ---
+        // sendToChat helper (duplicated since the sidebar's version is scoped)
+        function sendToChat(text) {
+          var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
+                   document.querySelector('textarea[placeholder="Processing..."]');
+          if (!ta) return;
+          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          nativeSetter.call(ta, text);
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.focus();
+          setTimeout(function() {
+            var sendBtn = ta.closest('form') && ta.closest('form').querySelector('button[type="submit"]');
+            if (sendBtn && !sendBtn.disabled) sendBtn.click();
+          }, 50);
+        }
+
         function getJobQueue() {
           try { return JSON.parse(localStorage.getItem(JOB_QUEUE_KEY)) || { jobs: [] }; }
           catch(e) { return { jobs: [] }; }
@@ -1340,10 +1358,11 @@
 
           // Job Queue toggle button
           var queueBtn = document.createElement('button');
-          queueBtn.innerHTML = '&#x1F4DD;';
+          queueBtn.textContent = 'Q';
           queueBtn.title = 'Job Queue';
-          queueBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
-            (jobQueueRunning ? 'opacity:1;' : 'opacity:0.6;');
+          queueBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (dark ? 'color:#e2e8f0;' : 'color:#1e293b;') +
+            (jobQueueRunning ? 'color:#3b82f6;' : '');
           queueBtn.onmouseenter = function() { queueBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
           queueBtn.onmouseleave = function() { queueBtn.style.background = 'transparent'; };
           queueBtn.onclick = function() { toggleJobQueuePanel(); };
