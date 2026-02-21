@@ -23,6 +23,7 @@ import { promises as fs } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import crypto from "node:crypto";
 async function readTextFile(path) {
   return await fs.readFile(path, "utf8");
 }
@@ -2419,6 +2420,39 @@ function createApp(runtime2, config) {
     (c) => handleAbortRequest(c, requestAbortControllers)
   );
   app.post("/api/chat", (c) => handleChatRequest(c, requestAbortControllers));
+  // Fork session endpoint — copies session file with new UUID, returns new session ID
+  app.post("/api/fork", async (c) => {
+    try {
+      const { sessionId, encodedProjectName } = await c.req.json();
+      if (!sessionId || !encodedProjectName) {
+        return c.json({ error: "sessionId and encodedProjectName are required" }, 400);
+      }
+      if (!validateEncodedProjectName(encodedProjectName)) {
+        return c.json({ error: "Invalid encoded project name" }, 400);
+      }
+      if (!validateSessionId(sessionId)) {
+        return c.json({ error: "Invalid session ID" }, 400);
+      }
+      const homeDir = getHomeDir();
+      if (!homeDir) {
+        return c.json({ error: "Home directory not found" }, 500);
+      }
+      const historyDir = `${homeDir}/.claude/projects/${encodedProjectName}`;
+      const srcPath = `${historyDir}/${sessionId}.jsonl`;
+      if (!(await exists(srcPath))) {
+        return c.json({ error: "Session not found: " + sessionId }, 404);
+      }
+      // Generate new UUID
+      const newId = crypto.randomUUID();
+      const dstPath = `${historyDir}/${newId}.jsonl`;
+      await fs.copyFile(srcPath, dstPath);
+      logger.chat.debug(`Forked session ${sessionId} -> ${newId}`);
+      return c.json({ newSessionId: newId, originalSessionId: sessionId });
+    } catch (error) {
+      logger.chat.error("Fork failed: {error}", { error });
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
   // Process tree endpoint - shows child processes with kill capability
   app.get("/api/processes", async (c) => {
     try {

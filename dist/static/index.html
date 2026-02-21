@@ -658,10 +658,15 @@
 
         function injectTitle() {
           if (document.getElementById('session-title-row')) return;
+
+          // Get session ID: from React header span OR from SDK stream
           var sessionId = getSessionId();
+          if (!sessionId && window.__currentFullSessionId) {
+            sessionId = window.__currentFullSessionId.substring(0, 8);
+          }
           if (!sessionId) return;
 
-          // Find the session span's parent container
+          // Try to find React's session span to inject next to it (original tab)
           var spans = document.querySelectorAll('span');
           var sessionSpan = null;
           for (var i = 0; i < spans.length; i++) {
@@ -670,10 +675,37 @@
               break;
             }
           }
-          if (!sessionSpan) return;
+          var headerRow = sessionSpan ? sessionSpan.closest('div') : null;
 
-          // Walk up to find the header bar container
-          var headerRow = sessionSpan.closest('div');
+          // Fallback for forked tabs: find the sidebar/header area with project path
+          if (!headerRow) {
+            // Look for the flex-shrink-0 sidebar that contains project info
+            var sidePanels = document.querySelectorAll('div.flex-shrink-0, div[class*="shrink"]');
+            for (var sp = 0; sp < sidePanels.length; sp++) {
+              var spText = sidePanels[sp].textContent || '';
+              if (spText.indexOf('Conversation') !== -1 || spText.indexOf('C:/') !== -1 || spText.indexOf('C:\\') !== -1) {
+                headerRow = sidePanels[sp];
+                break;
+              }
+            }
+            // Last resort: find any container with the project path
+            if (!headerRow) {
+              var allDivs = document.querySelectorAll('div');
+              for (var d = 0; d < allDivs.length; d++) {
+                var kids = allDivs[d].children;
+                if (kids.length >= 1 && kids.length <= 8) {
+                  for (var k = 0; k < kids.length; k++) {
+                    var kidText = (kids[k].textContent || '').trim();
+                    if (kidText.match(/^C:[/\\]/) && kidText.length < 80) {
+                      headerRow = allDivs[d];
+                      break;
+                    }
+                  }
+                }
+                if (headerRow) break;
+              }
+            }
+          }
           if (!headerRow) return;
 
           var dark = isDark();
@@ -703,6 +735,8 @@
             var val = input.value.trim();
             saveTitle(sessionId, val);
             input.style.width = Math.max(120, (val.length || 18) * 7.5) + 'px';
+            // Update tab title
+            document.title = (val ? val + ' ' : '') + '[' + sessionId + '] Claude Code';
           };
           input.oninput = function() {
             input.style.width = Math.max(120, (input.value.length || 18) * 7.5) + 'px';
@@ -711,19 +745,96 @@
 
           row.appendChild(input);
 
-          // Insert after the header row
-          headerRow.parentNode.insertBefore(row, headerRow.nextSibling);
+          // Fork session button — copies session file server-side, opens new tab
+          var forkBtn = document.createElement('button');
+          forkBtn.title = 'Fork — copy this session and open in a new tab';
+          forkBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:4px;"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1 0v1.836A2.489 2.489 0 0 0 4 9.5v.208a2.25 2.25 0 1 0 1 0V9.5a1.5 1.5 0 0 1 1.5-1.5h1A2.489 2.489 0 0 0 10 6.208V5.372a2.25 2.25 0 1 0-1 0v.836A1.5 1.5 0 0 1 7.5 7.5h-1A2.489 2.489 0 0 0 4 8.208V5.372ZM5 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm5.5-9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>Fork';
+          forkBtn.style.cssText = 'border:none;cursor:pointer;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;font-family:ui-sans-serif,system-ui,sans-serif;display:flex;align-items:center;transition:background 0.15s,opacity 0.15s;' +
+            (dark ? 'background:#1e3a5f;color:#93c5fd;' : 'background:#eff6ff;color:#2563eb;');
+          forkBtn.onmouseenter = function() { forkBtn.style.background = dark ? '#1e4080' : '#dbeafe'; };
+          forkBtn.onmouseleave = function() { forkBtn.style.background = dark ? '#1e3a5f' : '#eff6ff'; };
+          forkBtn.onclick = function() {
+            // Get project encoded name
+            var pathParts = window.location.pathname.match(/\/projects\/(.+)/);
+            if (!pathParts) { alert('Cannot determine project path'); return; }
+            var projectPath = decodeURIComponent(pathParts[1]);
+            var encodedProject = projectPath.replace(/[/\\:._]/g, '-');
+
+            // Resolve full session ID
+            var fullId = window.__currentFullSessionId;
+            forkBtn.textContent = '...';
+            forkBtn.disabled = true;
+
+            var doFork = function(resolvedId) {
+              // Call server-side fork endpoint
+              fetch('/api/fork', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: resolvedId, encodedProjectName: encodedProject })
+              })
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (data.error) { alert('Fork failed: ' + data.error); return; }
+                // Open new tab pointing at the forked session — React loads it natively
+                var url = new URL(window.location.href);
+                url.searchParams.set('sessionId', data.newSessionId);
+                url.searchParams.delete('view');
+                url.searchParams.delete('fork');
+                window.open(url.toString(), '_blank');
+              })
+              .catch(function(err) { alert('Fork error: ' + err.message); })
+              .finally(function() {
+                forkBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:4px;"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1 0v1.836A2.489 2.489 0 0 0 4 9.5v.208a2.25 2.25 0 1 0 1 0V9.5a1.5 1.5 0 0 1 1.5-1.5h1A2.489 2.489 0 0 0 10 6.208V5.372a2.25 2.25 0 1 0-1 0v.836A1.5 1.5 0 0 1 7.5 7.5h-1A2.489 2.489 0 0 0 4 8.208V5.372ZM5 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm5.5-9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>Fork';
+                forkBtn.disabled = false;
+              });
+            };
+
+            if (fullId && fullId.length > 8) {
+              doFork(fullId);
+            } else {
+              // Look up full ID from histories first
+              fetch('/api/projects/' + encodedProject + '/histories')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                  var sessions = data.conversations || [];
+                  for (var j = 0; j < sessions.length; j++) {
+                    if (sessions[j].sessionId && sessions[j].sessionId.indexOf(sessionId) === 0) {
+                      window.__currentFullSessionId = sessions[j].sessionId;
+                      doFork(sessions[j].sessionId);
+                      return;
+                    }
+                  }
+                  alert('Could not find full session ID for ' + sessionId);
+                  forkBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:4px;"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1 0v1.836A2.489 2.489 0 0 0 4 9.5v.208a2.25 2.25 0 1 0 1 0V9.5a1.5 1.5 0 0 1 1.5-1.5h1A2.489 2.489 0 0 0 10 6.208V5.372a2.25 2.25 0 1 0-1 0v.836A1.5 1.5 0 0 1 7.5 7.5h-1A2.489 2.489 0 0 0 4 8.208V5.372ZM5 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm5.5-9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>Fork';
+                  forkBtn.disabled = false;
+                })
+                .catch(function(err) {
+                  alert('Error: ' + err.message);
+                  forkBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:4px;"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1 0v1.836A2.489 2.489 0 0 0 4 9.5v.208a2.25 2.25 0 1 0 1 0V9.5a1.5 1.5 0 0 1 1.5-1.5h1A2.489 2.489 0 0 0 10 6.208V5.372a2.25 2.25 0 1 0-1 0v.836A1.5 1.5 0 0 1 7.5 7.5h-1A2.489 2.489 0 0 0 4 8.208V5.372ZM5 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm5.5-9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>Fork';
+                  forkBtn.disabled = false;
+                });
+            }
+          };
+          row.appendChild(forkBtn);
+
+          // Insert: after header row if React rendered session span, or append to container
+          if (sessionSpan) {
+            headerRow.parentNode.insertBefore(row, headerRow.nextSibling);
+          } else {
+            headerRow.appendChild(row);
+          }
         }
 
-        // Use MutationObserver to detect when session info appears in DOM
+        // Use MutationObserver + polling to detect when session info appears in DOM
         var obs = new MutationObserver(function() {
           injectTitle();
         });
 
         window.addEventListener('load', function() {
           obs.observe(document.body, { childList: true, subtree: true });
-          // Initial check
+          // Initial check + polling fallback (React re-renders can remove injected elements)
           setTimeout(injectTitle, 500);
+          setInterval(injectTitle, 2000);
         });
       })();
     </script>
@@ -762,16 +873,22 @@
           var activeDir = localStorage.getItem(DIR_KEY) || '';
           var chip = document.getElementById('cwd-chip');
           if (!activeDir) { if (chip) chip.style.display = 'none'; return; }
+          // Try to place chip inside session-title-row if it exists
+          var titleRow = document.getElementById('session-title-row');
           if (!chip) {
             chip = document.createElement('div');
             chip.id = 'cwd-chip';
-            chip.style.cssText = 'position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:100001;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 14px;border-radius:14px;font-size:11px;font-family:ui-monospace,monospace;cursor:default;user-select:all;';
             document.body.appendChild(chip);
           }
           var dark = isDark();
-          // Shift down if restore badge is showing
-          var badge = document.getElementById('session-restored-badge');
-          chip.style.top = badge ? '36px' : '6px';
+          if (titleRow && !titleRow.contains(chip)) {
+            // Move into the title row — inline with session name + fork button
+            chip.style.cssText = 'max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 10px;border-radius:10px;font-size:10px;font-family:ui-monospace,monospace;cursor:default;user-select:all;margin-left:auto;';
+            titleRow.appendChild(chip);
+          } else if (!titleRow) {
+            // Fallback: fixed position top-right when no session header
+            chip.style.cssText = 'position:fixed;top:6px;right:160px;z-index:100001;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 10px;border-radius:10px;font-size:10px;font-family:ui-monospace,monospace;cursor:default;user-select:all;';
+          }
           chip.style.display = 'block';
           chip.style.background = dark ? '#1e293b' : '#f1f5f9';
           chip.style.color = dark ? '#94a3b8' : '#64748b';
@@ -2012,6 +2129,15 @@
             if (match && match[1] !== lastSeenSession) {
               lastSeenSession = match[1];
               saveSession(match[1]);
+              // Update browser tab title with session ID (and custom name if set)
+              try {
+                var titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
+                var shortId = match[1].substring(0, 8);
+                var customName = titles[match[1]] || titles[shortId] || '';
+                document.title = (customName ? customName + ' ' : '') + '[' + shortId + '] Claude Code';
+              } catch(e2) {
+                document.title = '[' + match[1].substring(0, 8) + '] Claude Code';
+              }
               console.log('[Session Restore] Saved session:', match[1]);
             }
           }
@@ -2033,6 +2159,7 @@
           if (url.indexOf('/api/chat') !== -1 && opts.method && opts.method.toUpperCase() === 'POST' && opts.body) {
             try {
               var bodyObj = JSON.parse(opts.body);
+              var bodyChanged = false;
               // Inject saved sessionId if restoring (override whatever React set)
               if (restoreSessionId) {
                 console.log('[Session Restore] Overriding sessionId from', bodyObj.sessionId, 'to', restoreSessionId);
@@ -2040,11 +2167,15 @@
                 restoreSessionId = null;
                 var banner = document.getElementById('session-restore-banner');
                 if (banner) banner.remove();
+                bodyChanged = true;
+              }
+              if (bodyChanged) {
                 args = [args[0], Object.assign({}, opts, { body: JSON.stringify(bodyObj) })];
               }
               // Capture sessionId from outgoing requests to save it
               if (bodyObj.sessionId && bodyObj.sessionId !== lastSeenSession) {
                 lastSeenSession = bodyObj.sessionId;
+                window.__currentFullSessionId = bodyObj.sessionId; // Store full ID for fork button
                 saveSession(bodyObj.sessionId);
                 console.log('[Session Restore] Saved session:', bodyObj.sessionId);
               }
@@ -2054,12 +2185,9 @@
           return _origFetch.apply(this, args);
         };
 
-        // Show restore banner on load (only on refresh, not new tabs)
+        // Show restore banner on load — DISABLED: user can pick sessions from top-right menu
         function showRestoreBanner() {
-          if (isNewTab) return; // New tab = new project, don't offer restore
-          var saved = getSavedSession();
-          if (!saved || !saved.sessionId) return;
-          if (Date.now() - saved.timestamp > 24 * 60 * 60 * 1000) return;
+          return; // Restore feature disabled — sessions accessible via top-right session picker
 
           var dark = isDark();
 
@@ -2839,6 +2967,21 @@
                         try {
                           var sd = msg.data;
                           var tp = window.__thinkingProgress;
+
+                          // Capture full session_id from SDK messages
+                          if (sd.session_id && sd.session_id !== window.__currentFullSessionId) {
+                            window.__currentFullSessionId = sd.session_id;
+                            console.log('[Session] Full session ID:', sd.session_id);
+                            // Update tab title with new session ID (important for forks)
+                            var shortSid = sd.session_id.substring(0, 8);
+                            try {
+                              var _titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
+                              var _name = _titles[sd.session_id] || _titles[shortSid] || '';
+                              document.title = (_name ? _name + ' ' : '') + '[' + shortSid + '] Claude Code';
+                            } catch(e3) {
+                              document.title = '[' + shortSid + '] Claude Code';
+                            }
+                          }
 
                           // Extract token/usage data from result messages
                           if (tp && sd.type === 'result' && sd.usage) {
