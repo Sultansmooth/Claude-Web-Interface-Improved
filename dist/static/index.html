@@ -1628,10 +1628,17 @@
               card.appendChild(ic);
 
               var pt = document.createElement('div');
-              pt.style.cssText = 'flex:1;font-size:13px;line-height:1.4;word-break:break-word;' +
-                (job.prompt.length > 120 ? 'max-height:3.6em;overflow:hidden;' : '');
+              var ptLong = job.prompt.length > 120;
+              pt.style.cssText = 'flex:1;font-size:13px;line-height:1.4;word-break:break-word;white-space:pre-wrap;' +
+                (ptLong ? 'max-height:3.6em;overflow:hidden;cursor:pointer;' : '');
               pt.textContent = job.prompt;
-              pt.title = job.prompt;
+              if (ptLong) {
+                pt.onclick = function() {
+                  var open = this.style.maxHeight !== '3.6em';
+                  this.style.maxHeight = open ? '3.6em' : 'none';
+                  this.style.overflow = open ? 'hidden' : 'visible';
+                };
+              }
               card.appendChild(pt);
 
               var bw = document.createElement('div');
