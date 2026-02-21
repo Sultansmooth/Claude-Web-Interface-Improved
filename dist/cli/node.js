@@ -2460,22 +2460,21 @@ function createApp(runtime2, config) {
       const isWin = getPlatform() === "windows";
       if (isWin) {
         const { execSync: ex } = await import("node:child_process");
-        // Get all processes and build tree from our PID down
-        const raw = ex('wmic process get ProcessId,ParentProcessId,Name,CommandLine /format:csv', {
-          encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore']
+        // Use PowerShell Get-CimInstance (wmic is deprecated on Windows 11)
+        const psCmd = `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"`;
+        const raw = ex(psCmd, {
+          encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore']
         }).trim();
-        const lines = raw.split('\n').filter(l => l.trim()).slice(1); // skip header
+        let parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) parsed = [parsed];
         const allProcs = [];
-        for (const line of lines) {
-          const cols = line.trim().split(',');
-          if (cols.length >= 5) {
-            // CSV format: Node,CommandLine,Name,ParentProcessId,ProcessId
-            const cmdLine = cols.slice(1, cols.length - 3).join(','); // CommandLine may contain commas
+        for (const p of parsed) {
+          if (p.ProcessId != null) {
             allProcs.push({
-              pid: parseInt(cols[cols.length - 1]),
-              ppid: parseInt(cols[cols.length - 2]),
-              name: cols[cols.length - 3],
-              cmd: cmdLine.substring(0, 200)
+              pid: p.ProcessId,
+              ppid: p.ParentProcessId || 0,
+              name: p.Name || '',
+              cmd: (p.CommandLine || '').substring(0, 200)
             });
           }
         }
