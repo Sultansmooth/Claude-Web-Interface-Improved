@@ -2098,18 +2098,33 @@
         var TAB_IDENTITY_KEY = 'claude-webui-tab-identity';
         var restoreSessionId = null;
 
+        // Full UUID is 36 chars (with dashes) or 32 chars (without)
+        function isFullUUID(id) { return id && id.length >= 32; }
+
         // Detect new tab vs refresh: sessionStorage persists across refreshes
-        // but is empty in brand-new tabs. Only offer restore on refresh.
+        // but is empty in brand-new tabs. Auto-restore session on refresh.
         var isNewTab = !sessionStorage.getItem(TAB_IDENTITY_KEY);
         if (isNewTab) {
           sessionStorage.setItem(TAB_IDENTITY_KEY, Date.now().toString());
+        } else {
+          // This is a refresh — auto-restore only if we have a FULL UUID
+          var saved = getSavedSession();
+          if (saved && saved.sessionId && isFullUUID(saved.sessionId)) {
+            restoreSessionId = saved.sessionId;
+            window.__currentFullSessionId = saved.sessionId;
+            console.log('[Session Restore] Auto-restoring session on refresh:', saved.sessionId);
+          }
         }
-
         function getSavedSession() {
           try { return JSON.parse(localStorage.getItem(SESSION_KEY)); }
           catch { return null; }
         }
         function saveSession(sessionId) {
+          // Only save full UUIDs — never overwrite a full UUID with a truncated one
+          if (!isFullUUID(sessionId)) {
+            var existing = getSavedSession();
+            if (existing && isFullUUID(existing.sessionId)) return; // don't overwrite
+          }
           localStorage.setItem(SESSION_KEY, JSON.stringify({
             sessionId: sessionId,
             url: window.location.href,
@@ -2126,19 +2141,25 @@
           for (var i = 0; i < spans.length; i++) {
             var text = spans[i].textContent || '';
             var match = text.match(/Session:\s*([a-f0-9]{8,})/);
-            if (match && match[1] !== lastSeenSession) {
-              lastSeenSession = match[1];
-              saveSession(match[1]);
-              // Update browser tab title with session ID (and custom name if set)
-              try {
-                var titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
-                var shortId = match[1].substring(0, 8);
-                var customName = titles[match[1]] || titles[shortId] || '';
-                document.title = (customName ? customName + ' ' : '') + '[' + shortId + '] Claude Code';
-              } catch(e2) {
-                document.title = '[' + match[1].substring(0, 8) + '] Claude Code';
+            if (match) {
+              var domId = match[1];
+              // Prefer full UUID from __currentFullSessionId if it matches the short ID
+              var fullId = window.__currentFullSessionId;
+              var bestId = (fullId && fullId.indexOf(domId) === 0) ? fullId : domId;
+              if (bestId !== lastSeenSession) {
+                lastSeenSession = bestId;
+                saveSession(bestId);
+                // Update browser tab title with session ID (and custom name if set)
+                var shortId = bestId.substring(0, 8);
+                try {
+                  var titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
+                  var customName = titles[bestId] || titles[shortId] || '';
+                  document.title = (customName ? customName + ' ' : '') + '[' + shortId + '] Claude Code';
+                } catch(e2) {
+                  document.title = '[' + shortId + '] Claude Code';
+                }
+                console.log('[Session Restore] Saved session:', bestId);
               }
-              console.log('[Session Restore] Saved session:', match[1]);
             }
           }
         }
