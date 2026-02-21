@@ -1732,6 +1732,179 @@
       })();
     </script>
 
+    <script>
+      // Slash command palette — shows when typing / in textarea or via F1
+      (function() {
+        var COMMANDS = [
+          { cmd: '/compact', desc: 'Clear history but keep a summary in context' },
+          { cmd: '/clear', desc: 'Clear conversation history and free up context' },
+          { cmd: '/cost', desc: 'Show total cost and duration of current session' },
+          { cmd: '/commit', desc: 'Commit changes with a generated message' },
+          { cmd: '/todos', desc: 'List current todo items' },
+          { cmd: '/files', desc: 'List all files currently in context' },
+          { cmd: '/init', desc: 'Initialize a new CLAUDE.md file' },
+          { cmd: '/review', desc: 'Review a pull request' },
+          { cmd: '/pr-comments', desc: 'Get comments from a GitHub PR' },
+          { cmd: '/export', desc: 'Export conversation to file or clipboard' },
+          { cmd: '/status', desc: 'Show version, model, account info' },
+          { cmd: '/resume', desc: 'Resume a previous conversation' },
+          { cmd: '/memory', desc: 'Edit Claude memory files' },
+          { cmd: '/config', desc: 'Open config panel' },
+          { cmd: '/hooks', desc: 'Manage hook configurations' },
+          { cmd: '/mcp', desc: 'Manage MCP servers' },
+          { cmd: '/bashes', desc: 'List and manage background tasks' },
+          { cmd: '/add-dir', desc: 'Add a new working directory' },
+          { cmd: '/help', desc: 'Show help and available commands' }
+        ];
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function sendToChat(text) {
+          var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
+                   document.querySelector('textarea[placeholder="Processing..."]');
+          if (!ta) return;
+          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          nativeSetter.call(ta, text);
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.focus();
+          setTimeout(function() {
+            var sendBtn = ta.closest('form') && ta.closest('form').querySelector('button[type="submit"]');
+            if (sendBtn && !sendBtn.disabled) sendBtn.click();
+          }, 50);
+        }
+
+        var palette = null;
+        var selectedIdx = 0;
+        var filteredCmds = COMMANDS;
+
+        function showPalette(filterText) {
+          hidePalette();
+          var dark = isDark();
+          var ta = document.querySelector('textarea[placeholder="Type message..."]') ||
+                   document.querySelector('textarea[placeholder="Processing..."]');
+          if (!ta) return;
+
+          var filter = (filterText || '').toLowerCase().replace(/^\//, '');
+          filteredCmds = COMMANDS.filter(function(c) {
+            return c.cmd.toLowerCase().indexOf(filter) !== -1 || c.desc.toLowerCase().indexOf(filter) !== -1;
+          });
+          if (filteredCmds.length === 0) return;
+          selectedIdx = 0;
+
+          palette = document.createElement('div');
+          palette.id = 'cmd-palette';
+          palette.style.cssText = 'position:fixed;z-index:200000;max-height:300px;overflow-y:auto;border-radius:10px;padding:4px 0;font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,0.2);' +
+            (dark ? 'background:#1e293b;border:1px solid #334155;' : 'background:#fff;border:1px solid #e2e8f0;');
+
+          // Position above the textarea
+          var rect = ta.getBoundingClientRect();
+          palette.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+          palette.style.left = rect.left + 'px';
+          palette.style.width = Math.min(380, rect.width) + 'px';
+
+          filteredCmds.forEach(function(c, i) {
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:baseline;gap:8px;padding:7px 12px;cursor:pointer;transition:background 0.1s;' +
+              (i === selectedIdx ? (dark ? 'background:#334155;' : 'background:#f1f5f9;') : '');
+            row.onmouseenter = function() {
+              selectedIdx = i;
+              highlightRow();
+            };
+            row.onclick = function() {
+              hidePalette();
+              sendToChat(c.cmd);
+            };
+            var cmdEl = document.createElement('span');
+            cmdEl.style.cssText = 'font-weight:600;font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap;' +
+              (dark ? 'color:#93c5fd;' : 'color:#2563eb;');
+            cmdEl.textContent = c.cmd;
+            row.appendChild(cmdEl);
+            var descEl = document.createElement('span');
+            descEl.style.cssText = 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+              (dark ? 'color:#94a3b8;' : 'color:#64748b;');
+            descEl.textContent = c.desc;
+            row.appendChild(descEl);
+            palette.appendChild(row);
+          });
+
+          document.body.appendChild(palette);
+        }
+
+        function highlightRow() {
+          if (!palette) return;
+          var rows = palette.children;
+          var dark = isDark();
+          for (var i = 0; i < rows.length; i++) {
+            rows[i].style.background = i === selectedIdx ? (dark ? '#334155' : '#f1f5f9') : 'transparent';
+          }
+        }
+
+        function hidePalette() {
+          if (palette) { palette.remove(); palette = null; }
+        }
+
+        // Watch textarea for / typing
+        document.addEventListener('input', function(e) {
+          var ta = e.target;
+          if (!ta || ta.tagName !== 'TEXTAREA') return;
+          var val = ta.value || '';
+          if (val.startsWith('/') && val.indexOf('\n') === -1) {
+            showPalette(val);
+          } else {
+            hidePalette();
+          }
+        }, true);
+
+        // Keyboard navigation in palette
+        document.addEventListener('keydown', function(e) {
+          if (!palette) {
+            // F1 to open command palette
+            if (e.key === 'F1') {
+              e.preventDefault();
+              var ta = document.querySelector('textarea[placeholder="Type message..."]');
+              if (ta) {
+                var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+                nativeSetter.call(ta, '/');
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                ta.focus();
+                showPalette('/');
+              }
+            }
+            return;
+          }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            selectedIdx = Math.min(selectedIdx + 1, filteredCmds.length - 1);
+            highlightRow();
+            // Scroll into view
+            var rows = palette.children;
+            if (rows[selectedIdx]) rows[selectedIdx].scrollIntoView({ block: 'nearest' });
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            selectedIdx = Math.max(selectedIdx - 1, 0);
+            highlightRow();
+            var rows2 = palette.children;
+            if (rows2[selectedIdx]) rows2[selectedIdx].scrollIntoView({ block: 'nearest' });
+          } else if (e.key === 'Enter' && filteredCmds[selectedIdx]) {
+            e.preventDefault();
+            var cmd = filteredCmds[selectedIdx].cmd;
+            hidePalette();
+            sendToChat(cmd);
+          } else if (e.key === 'Escape') {
+            hidePalette();
+          }
+        }, true);
+
+        // Close on click outside
+        document.addEventListener('click', function(e) {
+          if (palette && !palette.contains(e.target)) {
+            var ta = document.querySelector('textarea');
+            if (e.target !== ta) hidePalette();
+          }
+        }, true);
+      })();
+    </script>
+
     <!-- Auto-approve permissions -->
     <script>
       (function() {
