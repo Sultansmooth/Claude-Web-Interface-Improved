@@ -2162,7 +2162,7 @@ async function handleConversationRequest(c) {
 
 // handlers/chat.ts
 import { query, tool as sdkTool, createSdkMcpServer } from "@anthropic-ai/claude-code";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 // Global map: requestId -> Map<questionId, resolve>
 var globalPendingAnswers = /* @__PURE__ */ new Map();
@@ -2233,16 +2233,40 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       ]
     });
 
+    // Signal to close the streaming prompt (resolves when result message is received)
+    let closePrompt;
+    const closePromptPromise = new Promise((resolve) => { closePrompt = resolve; });
+
+    // Streaming prompt generator - stays open for MCP control channel until result
+    async function* streamingPrompt() {
+      yield {
+        type: "user",
+        message: { role: "user", content: processedMessage },
+        parent_tool_use_id: null
+      };
+      // Keep stream open until we receive a result message or abort
+      await Promise.race([
+        closePromptPromise,
+        new Promise((resolve) => {
+          abortController.signal.addEventListener("abort", resolve);
+        })
+      ]);
+    }
+
     for await (const sdkMessage of query({
-      prompt: processedMessage,
+      prompt: streamingPrompt(),
       options: {
         abortController,
         pathToClaudeCodeExecutable: "C:\\Users\\rober\\.local\\bin\\claude.exe",
         permissionMode: "bypassPermissions",
+        env: { ...process.env, CLAUDECODE: "" },
+        stderr: (data) => { logger.chat.error("CLI stderr: " + data); },
         ...sessionId ? { resume: sessionId } : {},
         ...workingDirectory ? { cwd: workingDirectory } : {},
         allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
-        mcpServers: { "ask-user-webui": askUserMcp }
+        disallowedTools: ["AskUserQuestion"],
+        mcpServers: { "ask-user-webui": askUserMcp },
+        appendSystemPrompt: "IMPORTANT: When you need to ask the user a question with options, use the mcp__ask-user-webui__AskUserQuestion tool. This is the correct tool for asking user questions in this web interface."
       }
     })) {
       logger.chat.debug("Claude SDK Message: {sdkMessage}", { sdkMessage });
@@ -2250,6 +2274,11 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
         type: "claude_json",
         data: sdkMessage
       };
+      // When we receive the "result" message, signal the streaming prompt to close
+      // This lets the CLI process exit cleanly
+      if (sdkMessage && sdkMessage.type === "result") {
+        closePrompt();
+      }
     }
     yield { type: "done" };
   } catch (error) {
@@ -2261,6 +2290,10 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       };
     }
   } finally {
+    // Abort to release the streaming prompt generator's await
+    if (abortController && !abortController.signal.aborted) {
+      abortController.abort();
+    }
     if (requestAbortControllers.has(requestId)) {
       requestAbortControllers.delete(requestId);
     }
