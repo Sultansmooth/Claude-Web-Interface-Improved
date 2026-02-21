@@ -2431,6 +2431,24 @@ function createApp(runtime2, config) {
       return c.json({ error: "Could not read file" }, 404);
     }
   });
+  // Open file in default system editor
+  app.post("/api/open-file", async (c) => {
+    const { filePath } = await c.req.json();
+    if (!filePath) return c.json({ error: "filePath required" }, 400);
+    if (!(await exists(filePath))) return c.json({ error: "File not found" }, 404);
+    try {
+      const { exec } = await import("node:child_process");
+      const platform = process.platform;
+      let cmd;
+      if (platform === "win32") cmd = `start "" "${filePath}"`;
+      else if (platform === "darwin") cmd = `open "${filePath}"`;
+      else cmd = `xdg-open "${filePath}"`;
+      exec(cmd);
+      return c.json({ success: true });
+    } catch(e) {
+      return c.json({ error: "Failed to open file" }, 500);
+    }
+  });
   // Endpoint for frontend to submit answers to AskUserQuestion
   app.post("/api/answer/:requestId", async (c) => {
     const requestId = c.req.param("requestId");

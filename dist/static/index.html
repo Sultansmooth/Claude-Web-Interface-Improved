@@ -75,18 +75,17 @@
   <body>
     <div id="root"></div>
     <script>
-      // Project Directory Sidebar - persistent across tabs via localStorage
+      // Sidebar with Projects + Docs tabs
       (function() {
         var STORAGE_KEY = 'claude-webui-project-dirs';
         var COLLAPSED_KEY = 'claude-webui-sidebar-collapsed';
+        var TAB_KEY = 'claude-webui-sidebar-tab';
+        var ACTIVE_DIR_KEY = 'claude-webui-active-dir';
 
-        // Items are objects: { type: 'dir', path: '...' } or { type: 'sep' }
-        // Migrate old string[] format
         function getItems() {
           try {
             var raw = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
             if (raw.length && typeof raw[0] === 'string') {
-              // Migrate from old format
               var migrated = raw.map(function(s) { return { type: 'dir', path: s }; });
               saveItems(migrated);
               return migrated;
@@ -97,6 +96,10 @@
         function saveItems(items) { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }
         function isCollapsed() { return localStorage.getItem(COLLAPSED_KEY) === '1'; }
         function setCollapsed(v) { localStorage.setItem(COLLAPSED_KEY, v ? '1' : '0'); }
+        function getTab() { return localStorage.getItem(TAB_KEY) || 'projects'; }
+        function setTab(t) { localStorage.setItem(TAB_KEY, t); }
+        function getActiveDir() { return localStorage.getItem(ACTIVE_DIR_KEY) || ''; }
+        function setActiveDir(d) { localStorage.setItem(ACTIVE_DIR_KEY, d); }
 
         function isDark() { return document.documentElement.classList.contains('dark'); }
 
@@ -124,6 +127,54 @@
           setTimeout(function() { t.remove(); }, 1800);
         }
 
+        // Doc viewer modal
+        function showDocViewer(doc) {
+          var existing = document.getElementById('doc-viewer-modal');
+          if (existing) existing.remove();
+          var dark = isDark();
+
+          var overlay = document.createElement('div');
+          overlay.id = 'doc-viewer-modal';
+          overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:200000;display:flex;align-items:center;justify-content:center;';
+          overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+
+          var modal = document.createElement('div');
+          modal.style.cssText = 'width:90%;max-width:700px;max-height:80vh;display:flex;flex-direction:column;border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.3);' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;');
+
+          var header = document.createElement('div');
+          header.style.cssText = 'padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';';
+          var titleEl = document.createElement('span');
+          titleEl.style.cssText = 'font-weight:600;font-size:14px;';
+          titleEl.textContent = doc.name;
+          header.appendChild(titleEl);
+
+          var closeBtn = document.createElement('button');
+          closeBtn.innerHTML = '&times;';
+          closeBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:20px;color:' + (dark ? '#94a3b8' : '#64748b') + ';';
+          closeBtn.onclick = function() { overlay.remove(); };
+          header.appendChild(closeBtn);
+          modal.appendChild(header);
+
+          var content = document.createElement('div');
+          content.style.cssText = 'flex:1;overflow-y:auto;padding:16px;font-size:13px;line-height:1.6;white-space:pre-wrap;font-family:ui-monospace,monospace;' +
+            (dark ? 'color:#cbd5e1;' : 'color:#334155;');
+          content.textContent = 'Loading...';
+          modal.appendChild(content);
+
+          overlay.appendChild(modal);
+          document.body.appendChild(overlay);
+
+          // Fetch doc content
+          fetch('/api/docs/read?path=' + encodeURIComponent(doc.path))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data.error) content.textContent = 'Error: ' + data.error;
+              else content.textContent = data.content;
+            })
+            .catch(function() { content.textContent = 'Failed to load file.'; });
+        }
+
         function render() {
           var existing = document.getElementById('proj-sidebar');
           if (existing) existing.remove();
@@ -132,12 +183,13 @@
 
           var dark = isDark();
           var collapsed = isCollapsed();
+          var activeTab = getTab();
 
           // Toggle button
           var toggleBtn = document.createElement('button');
           toggleBtn.id = 'proj-sidebar-toggle';
           toggleBtn.innerHTML = collapsed ? '&#x1F4C1;' : '&#x2715;';
-          toggleBtn.title = collapsed ? 'Open project directories' : 'Close sidebar';
+          toggleBtn.title = collapsed ? 'Open sidebar' : 'Close sidebar';
           toggleBtn.style.cssText = 'position:fixed;top:8px;right:' + (collapsed ? '8px' : '228px') + ';z-index:100001;border:1px solid ' + (dark ? 'rgba(148,163,184,0.3)' : 'rgba(128,128,128,0.3)') + ';border-radius:6px;cursor:pointer;font-size:14px;padding:4px 8px;opacity:0.6;transition:opacity 0.2s,right 0.2s;background:' + (dark ? '#1e293b' : '#fff') + ';color:' + (dark ? '#e2e8f0' : '#334155') + ';';
           toggleBtn.onmouseenter = function() { toggleBtn.style.opacity = '1'; };
           toggleBtn.onmouseleave = function() { toggleBtn.style.opacity = '0.6'; };
@@ -152,14 +204,40 @@
           panel.style.cssText = 'position:fixed;top:0;right:0;width:220px;height:100vh;z-index:100000;display:flex;flex-direction:column;border-left:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;' +
             (dark ? 'background:#0f172a;color:#e2e8f0;' : 'background:#f8fafc;color:#1e293b;');
 
-          // Header
-          var header = document.createElement('div');
-          header.style.cssText = 'padding:12px 12px 8px;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:' + (dark ? '#94a3b8' : '#64748b') + ';display:flex;justify-content:space-between;align-items:center;';
-          var headerText = document.createElement('span');
-          headerText.textContent = 'Projects';
-          header.appendChild(headerText);
+          // Tab bar
+          var tabBar = document.createElement('div');
+          tabBar.style.cssText = 'display:flex;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';';
 
-          // Add separator button
+          function makeTab(label, key) {
+            var tab = document.createElement('button');
+            tab.textContent = label;
+            var isActive = activeTab === key;
+            tab.style.cssText = 'flex:1;padding:10px 0;border:none;cursor:pointer;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;transition:background 0.15s;' +
+              (isActive
+                ? (dark ? 'background:#0f172a;color:#e2e8f0;border-bottom:2px solid #3b82f6;' : 'background:#f8fafc;color:#1e293b;border-bottom:2px solid #3b82f6;')
+                : (dark ? 'background:#1e293b;color:#64748b;border-bottom:2px solid transparent;' : 'background:#e2e8f0;color:#94a3b8;border-bottom:2px solid transparent;'));
+            tab.onmouseenter = function() { if (!isActive) tab.style.color = dark ? '#94a3b8' : '#64748b'; };
+            tab.onmouseleave = function() { if (!isActive) tab.style.color = dark ? '#64748b' : '#94a3b8'; };
+            tab.onclick = function() { setTab(key); render(); };
+            return tab;
+          }
+          tabBar.appendChild(makeTab('Projects', 'projects'));
+          tabBar.appendChild(makeTab('Docs', 'docs'));
+          panel.appendChild(tabBar);
+
+          if (activeTab === 'projects') {
+            renderProjectsTab(panel, dark);
+          } else {
+            renderDocsTab(panel, dark);
+          }
+
+          document.body.appendChild(panel);
+        }
+
+        function renderProjectsTab(panel, dark) {
+          // Header with separator button
+          var header = document.createElement('div');
+          header.style.cssText = 'padding:8px 12px 6px;display:flex;justify-content:flex-end;';
           var sepBtn = document.createElement('button');
           sepBtn.textContent = '\u2500';
           sepBtn.title = 'Add separator';
@@ -209,17 +287,17 @@
           form.appendChild(addBtn);
           panel.appendChild(form);
 
-          // Divider below form
           var topDivider = document.createElement('div');
           topDivider.style.cssText = 'height:1px;margin:0 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
           panel.appendChild(topDivider);
 
-          // Item list (draggable)
+          // Item list
           var dragIdx = null;
           var list = document.createElement('div');
           list.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;';
 
           var items = getItems();
+          var activeDir = getActiveDir();
           if (items.length === 0) {
             var empty = document.createElement('div');
             empty.style.cssText = 'padding:16px 12px;text-align:center;font-size:12px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
@@ -232,20 +310,16 @@
               row.dataset.idx = idx;
 
               if (item.type === 'sep') {
-                // Separator row
                 row.style.cssText = 'display:flex;align-items:center;padding:4px 8px;margin:1px 4px;gap:4px;transition:opacity 0.15s;';
-
                 var handle = document.createElement('span');
                 handle.textContent = '\u2261';
                 handle.style.cssText = 'cursor:grab;font-size:12px;padding:0 2px;opacity:0.3;color:' + (dark ? '#94a3b8' : '#64748b') + ';flex-shrink:0;user-select:none;';
                 handle.onmouseenter = function() { handle.style.opacity = '0.7'; };
                 handle.onmouseleave = function() { handle.style.opacity = '0.3'; };
                 row.appendChild(handle);
-
                 var line = document.createElement('div');
                 line.style.cssText = 'flex:1;height:1px;' + (dark ? 'background:#334155;' : 'background:#cbd5e1;');
                 row.appendChild(line);
-
                 var delBtn = document.createElement('button');
                 delBtn.innerHTML = '&times;';
                 delBtn.title = 'Remove separator';
@@ -261,10 +335,11 @@
                 };
                 row.appendChild(delBtn);
               } else {
-                // Directory row
-                row.style.cssText = 'display:flex;align-items:center;padding:6px 8px;margin:1px 4px;border-radius:6px;cursor:pointer;transition:background 0.15s,opacity 0.15s;gap:4px;';
+                var isActive = item.path === activeDir;
+                row.style.cssText = 'display:flex;align-items:center;padding:6px 8px;margin:1px 4px;border-radius:6px;cursor:pointer;transition:background 0.15s,opacity 0.15s;gap:4px;' +
+                  (isActive ? (dark ? 'background:#1e293b;border-left:2px solid #3b82f6;' : 'background:#e2e8f0;border-left:2px solid #3b82f6;') : '');
                 row.onmouseenter = function() { row.style.background = dark ? '#1e293b' : '#e2e8f0'; };
-                row.onmouseleave = function() { row.style.background = 'transparent'; };
+                row.onmouseleave = function() { if (!isActive) row.style.background = 'transparent'; else row.style.background = dark ? '#1e293b' : '#e2e8f0'; };
 
                 var handle = document.createElement('span');
                 handle.textContent = '\u2261';
@@ -300,7 +375,9 @@
                 row.onclick = function(e) {
                   if (e.target === delBtn) return;
                   sendToChat('cd ' + item.path);
+                  setActiveDir(item.path);
                   if (window._autoTitleFromPath) window._autoTitleFromPath(item.path);
+                  render();
                 };
               }
 
@@ -348,13 +425,111 @@
           }
           panel.appendChild(list);
 
-          // Footer hint
           var footer = document.createElement('div');
           footer.style.cssText = 'padding:8px 12px;font-size:10px;text-align:center;color:' + (dark ? '#475569' : '#94a3b8') + ';border-top:1px solid ' + (dark ? '#1e293b' : '#e2e8f0') + ';';
           footer.textContent = 'Click to paste cd into chat';
           panel.appendChild(footer);
+        }
 
-          document.body.appendChild(panel);
+        function renderDocsTab(panel, dark) {
+          var activeDir = getActiveDir();
+
+          if (!activeDir) {
+            var hint = document.createElement('div');
+            hint.style.cssText = 'padding:24px 16px;text-align:center;font-size:12px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
+            hint.textContent = 'Click a project in the Projects tab first to scan for docs.';
+            panel.appendChild(hint);
+            return;
+          }
+
+          // Active dir label
+          var dirLabel = document.createElement('div');
+          dirLabel.style.cssText = 'padding:10px 12px 6px;font-size:11px;color:' + (dark ? '#64748b' : '#94a3b8') + ';';
+          var dirParts = activeDir.replace(/\\/g, '/').replace(/\/$/, '').split('/');
+          dirLabel.textContent = dirParts[dirParts.length - 1] || activeDir;
+          panel.appendChild(dirLabel);
+
+          var divider = document.createElement('div');
+          divider.style.cssText = 'height:1px;margin:0 8px;' + (dark ? 'background:#1e293b;' : 'background:#e2e8f0;');
+          panel.appendChild(divider);
+
+          // Doc list container
+          var list = document.createElement('div');
+          list.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;';
+
+          var loading = document.createElement('div');
+          loading.style.cssText = 'padding:16px 12px;text-align:center;font-size:12px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
+          loading.textContent = 'Scanning...';
+          list.appendChild(loading);
+          panel.appendChild(list);
+
+          // Fetch docs
+          fetch('/api/docs?dir=' + encodeURIComponent(activeDir))
+            .then(function(r) { return r.json(); })
+            .then(function(docs) {
+              list.innerHTML = '';
+              if (!docs || docs.length === 0) {
+                var empty = document.createElement('div');
+                empty.style.cssText = 'padding:16px 12px;text-align:center;font-size:12px;color:' + (dark ? '#475569' : '#94a3b8') + ';';
+                empty.textContent = 'No docs found';
+                list.appendChild(empty);
+                return;
+              }
+
+              // Group by folder
+              var groups = {};
+              docs.forEach(function(doc) {
+                if (!groups[doc.folder]) groups[doc.folder] = [];
+                groups[doc.folder].push(doc);
+              });
+
+              Object.keys(groups).forEach(function(folder) {
+                // Folder header
+                var folderHeader = document.createElement('div');
+                folderHeader.style.cssText = 'padding:6px 12px 2px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:' + (dark ? '#64748b' : '#94a3b8') + ';';
+                folderHeader.textContent = folder === 'root' ? 'Root' : folder + '/';
+                list.appendChild(folderHeader);
+
+                groups[folder].forEach(function(doc) {
+                  var row = document.createElement('div');
+                  row.style.cssText = 'display:flex;align-items:center;padding:5px 12px;margin:1px 4px;border-radius:6px;cursor:pointer;transition:background 0.15s;gap:6px;';
+                  row.onmouseenter = function() { row.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+                  row.onmouseleave = function() { row.style.background = 'transparent'; };
+
+                  var icon = document.createElement('span');
+                  var ext = doc.name.split('.').pop().toLowerCase();
+                  icon.textContent = ext === 'md' ? '\uD83D\uDCDD' : ext === 'pdf' ? '\uD83D\uDCC4' : '\uD83D\uDCC3';
+                  icon.style.cssText = 'font-size:12px;flex-shrink:0;';
+                  row.appendChild(icon);
+
+                  var nameEl = document.createElement('span');
+                  nameEl.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:500;';
+                  nameEl.textContent = doc.name;
+                  nameEl.title = doc.path;
+                  row.appendChild(nameEl);
+
+                  row.onclick = function() { showDocViewer(doc); };
+                  list.appendChild(row);
+                });
+              });
+            })
+            .catch(function() {
+              list.innerHTML = '';
+              var err = document.createElement('div');
+              err.style.cssText = 'padding:16px 12px;text-align:center;font-size:12px;color:' + (dark ? '#f87171' : '#ef4444') + ';';
+              err.textContent = 'Failed to scan directory';
+              list.appendChild(err);
+            });
+
+          // Refresh button at bottom
+          var footer = document.createElement('div');
+          footer.style.cssText = 'padding:8px 12px;text-align:center;border-top:1px solid ' + (dark ? '#1e293b' : '#e2e8f0') + ';';
+          var refreshBtn = document.createElement('button');
+          refreshBtn.textContent = 'Refresh';
+          refreshBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:10px;color:' + (dark ? '#3b82f6' : '#2563eb') + ';';
+          refreshBtn.onclick = function() { render(); };
+          footer.appendChild(refreshBtn);
+          panel.appendChild(footer);
         }
 
         // Watch for dark mode changes
@@ -873,8 +1048,44 @@
           };
           toolbar.appendChild(fontDownBtn);
 
+          // Open CLAUDE.md button
+          var claudeBtn = document.createElement('button');
+          claudeBtn.innerHTML = '&#x1F4CB;';
+          claudeBtn.title = 'Open CLAUDE.md (F4)';
+          claudeBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;';
+          claudeBtn.onmouseenter = function() { claudeBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          claudeBtn.onmouseleave = function() { claudeBtn.style.background = 'transparent'; };
+          claudeBtn.onclick = function() { window._openClaudeMd(); };
+          toolbar.appendChild(claudeBtn);
+
           document.body.appendChild(toolbar);
         }
+
+        // Open CLAUDE.md in default editor
+        window._openClaudeMd = function() {
+          var activeDir = localStorage.getItem('claude-webui-active-dir');
+          if (!activeDir) {
+            alert('No active project selected. Click a project in the sidebar first.');
+            return;
+          }
+          var sep = activeDir.indexOf('\\') !== -1 ? '\\' : '/';
+          var filePath = activeDir + sep + 'CLAUDE.md';
+          fetch('/api/open-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filePath: filePath })
+          }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.error) alert('Could not open CLAUDE.md: ' + data.error);
+          }).catch(function() { alert('Failed to open CLAUDE.md'); });
+        };
+
+        // F4 hotkey
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'F4' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            window._openClaudeMd();
+          }
+        });
 
         var observer = new MutationObserver(function(mutations) {
           mutations.forEach(function(m) {
