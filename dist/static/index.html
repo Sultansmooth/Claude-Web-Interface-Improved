@@ -1208,6 +1208,140 @@
       })();
     </script>
 
+    <!-- Session restore per tab -->
+    <script>
+      (function() {
+        var SESSION_KEY = 'claude-webui-tab-session-' + window.location.pathname;
+        var restoreSessionId = null;
+
+        function getSavedSession() {
+          try { return JSON.parse(localStorage.getItem(SESSION_KEY)); }
+          catch { return null; }
+        }
+        function saveSession(sessionId) {
+          localStorage.setItem(SESSION_KEY, JSON.stringify({
+            sessionId: sessionId,
+            url: window.location.href,
+            timestamp: Date.now()
+          }));
+        }
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        // Watch DOM for session ID and save it (MutationObserver + polling fallback)
+        var lastSeenSession = null;
+        function watchSessionId() {
+          var spans = document.querySelectorAll('span');
+          for (var i = 0; i < spans.length; i++) {
+            var text = spans[i].textContent || '';
+            var match = text.match(/Session:\s*([a-f0-9]{8,})/);
+            if (match && match[1] !== lastSeenSession) {
+              lastSeenSession = match[1];
+              saveSession(match[1]);
+              console.log('[Session Restore] Saved session:', match[1]);
+            }
+          }
+        }
+        var sessionObserver = new MutationObserver(function() { watchSessionId(); });
+        window.addEventListener('load', function() {
+          sessionObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+          watchSessionId();
+        });
+        setInterval(watchSessionId, 3000);
+
+        // Intercept outgoing /api/chat to inject saved sessionId
+        var _origFetch = window.fetch;
+        window.fetch = function() {
+          var args = arguments;
+          var url = (args[0] && typeof args[0] === 'string') ? args[0] : (args[0] && args[0].url ? args[0].url : '');
+          var opts = args[1] || {};
+
+          if (url.indexOf('/api/chat') !== -1 && opts.method && opts.method.toUpperCase() === 'POST' && opts.body) {
+            try {
+              var bodyObj = JSON.parse(opts.body);
+              // Inject saved sessionId if restoring (override whatever React set)
+              if (restoreSessionId) {
+                console.log('[Session Restore] Overriding sessionId from', bodyObj.sessionId, 'to', restoreSessionId);
+                bodyObj.sessionId = restoreSessionId;
+                restoreSessionId = null;
+                var banner = document.getElementById('session-restore-banner');
+                if (banner) banner.remove();
+                args = [args[0], Object.assign({}, opts, { body: JSON.stringify(bodyObj) })];
+              }
+              // Capture sessionId from outgoing requests to save it
+              if (bodyObj.sessionId && bodyObj.sessionId !== lastSeenSession) {
+                lastSeenSession = bodyObj.sessionId;
+                saveSession(bodyObj.sessionId);
+                console.log('[Session Restore] Saved session:', bodyObj.sessionId);
+              }
+            } catch(e) {}
+          }
+
+          return _origFetch.apply(this, args);
+        };
+
+        // Show restore banner on load
+        function showRestoreBanner() {
+          var saved = getSavedSession();
+          if (!saved || !saved.sessionId) return;
+          if (Date.now() - saved.timestamp > 24 * 60 * 60 * 1000) return;
+
+          var dark = isDark();
+
+          var banner = document.createElement('div');
+          banner.id = 'session-restore-banner';
+          banner.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);z-index:100000;display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.15);transition:opacity 0.3s;' +
+            (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;');
+
+          var text = document.createElement('span');
+          text.textContent = 'Restore last session?';
+          text.style.cssText = 'font-weight:500;';
+          banner.appendChild(text);
+
+          var sessionLabel = document.createElement('span');
+          sessionLabel.textContent = saved.sessionId.substring(0, 8) + '...';
+          sessionLabel.style.cssText = 'font-family:ui-monospace,monospace;font-size:11px;padding:2px 6px;border-radius:4px;' +
+            (dark ? 'background:#334155;color:#94a3b8;' : 'background:#f1f5f9;color:#64748b;');
+          banner.appendChild(sessionLabel);
+
+          var restoreBtn = document.createElement('button');
+          restoreBtn.textContent = 'Restore';
+          restoreBtn.style.cssText = 'padding:5px 14px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:600;transition:background 0.15s;background:#3b82f6;color:#fff;';
+          restoreBtn.onmouseenter = function() { restoreBtn.style.background = '#2563eb'; };
+          restoreBtn.onmouseleave = function() { restoreBtn.style.background = '#3b82f6'; };
+          restoreBtn.onclick = function() {
+            restoreSessionId = saved.sessionId;
+            banner.style.opacity = '0';
+            setTimeout(function() { banner.remove(); }, 300);
+            var t = document.createElement('div');
+            t.textContent = 'Session restored \u2014 chat looks empty but Claude has full context. Type "continue" to pick up where you left off.';
+            t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:8px;font-size:13px;z-index:100000;transition:opacity 0.5s;pointer-events:none;max-width:500px;text-align:center;line-height:1.4;' +
+              (dark ? 'background:#334155;color:#e2e8f0;' : 'background:#1e293b;color:#f1f5f9;');
+            document.body.appendChild(t);
+            setTimeout(function() { t.style.opacity = '0'; }, 4000);
+            setTimeout(function() { t.remove(); }, 4500);
+          };
+          banner.appendChild(restoreBtn);
+
+          var dismissBtn = document.createElement('button');
+          dismissBtn.innerHTML = '&times;';
+          dismissBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;' +
+            (dark ? 'color:#64748b;' : 'color:#94a3b8;');
+          dismissBtn.onclick = function() {
+            banner.style.opacity = '0';
+            setTimeout(function() { banner.remove(); }, 300);
+          };
+          banner.appendChild(dismissBtn);
+
+          document.body.appendChild(banner);
+        }
+
+        window.addEventListener('load', function() {
+          setTimeout(showRestoreBanner, 1000);
+        });
+      })();
+    </script>
+
     <!-- AskUserQuestion handler -->
     <script>
       (function() {
