@@ -2257,7 +2257,7 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       prompt: streamingPrompt(),
       options: {
         abortController,
-        pathToClaudeCodeExecutable: "C:\\Users\\rober\\.local\\bin\\claude.exe",
+        pathToClaudeCodeExecutable: cliPath,
         permissionMode: "bypassPermissions",
         env: { ...process.env, CLAUDECODE: "" },
         stderr: (data) => { logger.chat.error("CLI stderr: " + data); },
