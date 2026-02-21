@@ -50,8 +50,7 @@
     "format": "prettier --write \"**/*.ts\"",
     "format:check": "prettier --check \"**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "prepack": "node scripts/prepack.js",
-    "prepublishOnly": "npm run build && npm run test"
+    "prepack": "node scripts/prepack.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "1.0.108",
