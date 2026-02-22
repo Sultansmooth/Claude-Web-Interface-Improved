@@ -2655,6 +2655,114 @@
       })();
     </script>
 
+    <!-- Loop detection: repeated tool calls OR empty response stalls → auto-abort -->
+    <script>
+      (function() {
+        var recentCalls = [];
+        var TOOL_LOOP_THRESHOLD = 3;
+        var EMPTY_LOOP_THRESHOLD = 3;
+        var MAX_HISTORY = 10;
+        var emptyAssistantCount = 0;
+        var currentTurnHasContent = false;
+        var warningEl = null;
+
+        function getSignature(block) {
+          var sig = block.name || '';
+          if (block.input) {
+            if (block.input.command) sig += '::' + block.input.command;
+            else if (block.input.file_path) sig += '::' + block.input.file_path;
+            else if (block.input.pattern) sig += '::' + block.input.pattern;
+          }
+          return sig;
+        }
+
+        function abortCurrentRequest() {
+          // Find the current requestId from the fetch interceptor
+          var reqId = window.__currentRequestId;
+          if (reqId) {
+            console.log('[LoopDetector] Aborting request:', reqId);
+            fetch('/api/abort/' + encodeURIComponent(reqId), { method: 'POST' }).catch(function() {});
+          }
+        }
+
+        function showWarning(reason, autoAbort) {
+          if (warningEl) return;
+          if (autoAbort) abortCurrentRequest();
+          warningEl = document.createElement('div');
+          warningEl.id = 'loop-warning';
+          var dark = document.documentElement.classList.contains('dark');
+          warningEl.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:100000;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px;padding:12px 20px;border-radius:10px;display:flex;align-items:center;gap:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);max-width:500px;' +
+            (dark ? 'color:#fbbf24;background:rgba(30,30,20,0.97);border:1px solid #854d0e;' : 'color:#92400e;background:rgba(255,251,235,0.97);border:1px solid #f59e0b;');
+          warningEl.innerHTML =
+            '<span style="font-size:18px;">&#9888;</span>' +
+            '<div><strong>Loop detected' + (autoAbort ? ' — auto-stopped' : '') + '</strong><br><span style="font-size:12px;opacity:0.8;">' + reason.replace(/</g, '&lt;') + '</span></div>' +
+            '<button id="loop-dismiss" style="margin-left:auto;padding:4px 12px;border-radius:6px;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer;font-size:12px;flex-shrink:0;">OK</button>';
+          document.body.appendChild(warningEl);
+          document.getElementById('loop-dismiss').addEventListener('click', function() {
+            if (warningEl && warningEl.parentNode) warningEl.remove();
+            warningEl = null;
+          });
+          // Auto-dismiss after 15s
+          setTimeout(function() {
+            if (warningEl && warningEl.parentNode) warningEl.remove();
+            warningEl = null;
+          }, 15000);
+        }
+
+        window.__loopDetector = {
+          // Called for each tool_use block in assistant messages
+          onToolUse: function(block) {
+            currentTurnHasContent = true;
+            emptyAssistantCount = 0; // has content, not empty
+            var sig = getSignature(block);
+            if (!sig) return;
+            recentCalls.push(sig);
+            if (recentCalls.length > MAX_HISTORY) recentCalls.shift();
+            if (recentCalls.length >= TOOL_LOOP_THRESHOLD) {
+              var last = recentCalls[recentCalls.length - 1];
+              var repeats = 0;
+              for (var i = recentCalls.length - 1; i >= 0; i--) {
+                if (recentCalls[i] === last) repeats++;
+                else break;
+              }
+              if (repeats >= TOOL_LOOP_THRESHOLD) {
+                var shortSig = last.length > 60 ? last.substring(0, 60) + '...' : last;
+                showWarning(shortSig + ' repeated ' + repeats + ' times', true);
+              }
+            }
+          },
+          // Called when an assistant message arrives — check if it has content
+          onAssistant: function(sdData) {
+            currentTurnHasContent = false;
+            // Check if this assistant message has any meaningful content
+            if (sdData.message && sdData.message.content && sdData.message.content.length > 0) {
+              for (var i = 0; i < sdData.message.content.length; i++) {
+                var b = sdData.message.content[i];
+                if (b.type === 'tool_use') { currentTurnHasContent = true; break; }
+                if (b.type === 'text' && b.text && b.text.trim().length > 0) { currentTurnHasContent = true; break; }
+                if (b.type === 'thinking') { currentTurnHasContent = true; break; }
+              }
+            }
+            if (!currentTurnHasContent) {
+              emptyAssistantCount++;
+              console.log('[LoopDetector] Empty assistant message #' + emptyAssistantCount);
+              if (emptyAssistantCount >= EMPTY_LOOP_THRESHOLD) {
+                showWarning('Claude sent ' + emptyAssistantCount + ' empty responses in a row (stuck loop)', true);
+              }
+            } else {
+              emptyAssistantCount = 0;
+            }
+          },
+          // Reset on conversation turn end
+          reset: function() {
+            recentCalls = [];
+            emptyAssistantCount = 0;
+            currentTurnHasContent = false;
+          }
+        };
+      })();
+    </script>
+
     <!-- Message Queue (type while processing) -->
     <script>
       (function() {
@@ -3205,8 +3313,9 @@
     <!-- AskUserQuestion handler -->
     <script>
       (function() {
-        // Track the current requestId from outgoing chat requests
+        // Track the current requestId from outgoing chat requests (also exposed globally for loop detector)
         var currentRequestId = null;
+        Object.defineProperty(window, '__currentRequestId', { get: function() { return currentRequestId; } });
 
         // Monkey-patch fetch to intercept /api/chat streams
         var originalFetch = window.fetch;
@@ -3296,10 +3405,12 @@
                           // 'result' = response complete → hide indicator
                           if (sd.type === 'assistant') {
                             if (tp) tp.start();
+                            if (window.__loopDetector) window.__loopDetector.onAssistant(sd);
                           }
                           if (sd.type === 'result') {
                             if (tp && sd.usage) tp.onTokens(sd.usage.input_tokens, sd.usage.output_tokens);
                             if (tp) tp.stop();
+                            if (window.__loopDetector) window.__loopDetector.reset();
                           }
 
                           // Process assistant message content blocks
@@ -3326,15 +3437,18 @@
                                 window.__todoPanel.update(block.input.todos);
                               }
 
-                              // Track active tool for thinking indicator
-                              if (tp && block.type === 'tool_use' && block.name) {
-                                var toolLabel = block.name;
-                                if (block.input) {
-                                  if (block.input.command) toolLabel += ': ' + block.input.command.substring(0, 40);
-                                  else if (block.input.file_path) toolLabel += ': ' + block.input.file_path.split(/[/\\]/).pop();
-                                  else if (block.input.pattern) toolLabel += ': ' + block.input.pattern;
+                              // Track active tool for thinking indicator + loop detection
+                              if (block.type === 'tool_use' && block.name) {
+                                if (tp) {
+                                  var toolLabel = block.name;
+                                  if (block.input) {
+                                    if (block.input.command) toolLabel += ': ' + block.input.command.substring(0, 40);
+                                    else if (block.input.file_path) toolLabel += ': ' + block.input.file_path.split(/[/\\]/).pop();
+                                    else if (block.input.pattern) toolLabel += ': ' + block.input.pattern;
+                                  }
+                                  tp.onToolUse(toolLabel);
                                 }
-                                tp.onToolUse(toolLabel);
+                                if (window.__loopDetector) window.__loopDetector.onToolUse(block);
                               }
                             }
                           }
