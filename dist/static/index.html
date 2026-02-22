@@ -7,6 +7,18 @@
     <link rel="apple-touch-icon" href="/claude-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <title>Claude Code Web UI</title>
+    <style>
+      /* Orange scrollbar for the chat container */
+      #root *::-webkit-scrollbar { width: 8px; }
+      #root *::-webkit-scrollbar-track { background: transparent; }
+      #root *::-webkit-scrollbar-thumb { background: #f97316; border-radius: 4px; }
+      #root *::-webkit-scrollbar-thumb:hover { background: #ea580c; }
+      .dark #root *::-webkit-scrollbar-thumb { background: #c2410c; }
+      .dark #root *::-webkit-scrollbar-thumb:hover { background: #f97316; }
+      /* Firefox */
+      #root * { scrollbar-width: thin; scrollbar-color: #f97316 transparent; }
+      .dark #root * { scrollbar-color: #c2410c transparent; }
+    </style>
     <script>
       // Prevent flash of unstyled content by setting theme class early
       (function () {
@@ -1430,6 +1442,7 @@
           }
           return null;
         }
+        window.__getChatContainer = getChatContainer;
 
         function scrollToBottom() {
           var container = getChatContainer();
@@ -1441,6 +1454,8 @@
         function setupScrollObserver() {
           if (scrollObserver) scrollObserver.disconnect();
           scrollObserver = new MutationObserver(function() {
+            // Don't auto-scroll on history view or other non-chat pages
+            if (window.location.search.indexOf('view=') !== -1) return;
             var container = getChatContainer();
             if (!container) return;
             if (isAutoScroll()) {
@@ -2128,18 +2143,15 @@
         // Full UUID is 36 chars (with dashes) or 32 chars (without)
         function isFullUUID(id) { return id && id.length >= 32; }
 
-        // Detect new tab vs refresh: sessionStorage persists across refreshes
-        // but is empty in brand-new tabs. Auto-restore session on refresh.
+        // Track new tab vs refresh (sessionStorage persists across refreshes)
         var isNewTab = !sessionStorage.getItem(TAB_IDENTITY_KEY);
         if (isNewTab) {
           sessionStorage.setItem(TAB_IDENTITY_KEY, Date.now().toString());
         } else {
-          // This is a refresh — auto-restore only if we have a FULL UUID
+          // On refresh, just restore __currentFullSessionId for fork button — don't auto-resume
           var saved = getSavedSession();
           if (saved && saved.sessionId && isFullUUID(saved.sessionId)) {
-            restoreSessionId = saved.sessionId;
             window.__currentFullSessionId = saved.sessionId;
-            console.log('[Session Restore] Auto-restoring session on refresh:', saved.sessionId);
           }
         }
         function getSavedSession() {
@@ -2204,20 +2216,38 @@
         setInterval(function() {
           var currentUrl = window.location.href;
           var onHistoryNow = window.location.search.indexOf('view=history') !== -1;
+          if (onHistoryNow && !_wasOnHistoryView) {
+            _wasOnHistoryView = true;
+            // Scroll history list to top when entering
+            setTimeout(function() {
+              var container = window.__getChatContainer ? window.__getChatContainer() : null;
+              if (container) container.scrollTop = 0;
+            }, 300);
+          }
           if (onHistoryNow) { _wasOnHistoryView = true; }
           if (currentUrl !== _lastUrl) {
             _lastUrl = currentUrl;
             var params = new URLSearchParams(window.location.search);
-            // Just left history view and landed on blank conversation (no sessionId)
-            if (_wasOnHistoryView && !onHistoryNow && !params.get('sessionId')) {
+            // Just left history view — scroll to bottom after session loads
+            if (_wasOnHistoryView && !onHistoryNow) {
               _wasOnHistoryView = false;
-              var saved = getSavedSession();
-              if (saved && saved.sessionId && isFullUUID(saved.sessionId)) {
-                console.log('[Session Restore] Back from history, redirecting to session:', saved.sessionId);
-                params.set('sessionId', saved.sessionId);
-                window.location.replace(window.location.pathname + '?' + params.toString());
-                return;
+              // If no sessionId, redirect to saved session
+              if (!params.get('sessionId')) {
+                var saved = getSavedSession();
+                if (saved && saved.sessionId && isFullUUID(saved.sessionId)) {
+                  console.log('[Session Restore] Back from history, redirecting to session:', saved.sessionId);
+                  params.set('sessionId', saved.sessionId);
+                  window.location.replace(window.location.pathname + '?' + params.toString());
+                  return;
+                }
               }
+              // Scroll to bottom after React renders the session messages
+              var scrollAttempts = 0;
+              var scrollTimer = setInterval(function() {
+                var container = window.__getChatContainer ? window.__getChatContainer() : null;
+                if (container) { container.scrollTop = container.scrollHeight; }
+                if (++scrollAttempts >= 10) clearInterval(scrollTimer);
+              }, 300);
             }
           }
         }, 300);
@@ -2232,19 +2262,6 @@
           if (url.indexOf('/api/chat') !== -1 && opts.method && opts.method.toUpperCase() === 'POST' && opts.body) {
             try {
               var bodyObj = JSON.parse(opts.body);
-              var bodyChanged = false;
-              // Inject saved sessionId if restoring (override whatever React set)
-              if (restoreSessionId) {
-                console.log('[Session Restore] Overriding sessionId from', bodyObj.sessionId, 'to', restoreSessionId);
-                bodyObj.sessionId = restoreSessionId;
-                restoreSessionId = null;
-                var banner = document.getElementById('session-restore-banner');
-                if (banner) banner.remove();
-                bodyChanged = true;
-              }
-              if (bodyChanged) {
-                args = [args[0], Object.assign({}, opts, { body: JSON.stringify(bodyObj) })];
-              }
               // Capture sessionId from outgoing requests to save it
               if (bodyObj.sessionId && bodyObj.sessionId !== lastSeenSession) {
                 lastSeenSession = bodyObj.sessionId;
@@ -2671,8 +2688,11 @@
         var currentTodos = [];
         var panelCollapsed = false;
         var POS_KEY = 'claude-webui-todo-pos';
+        var SIZE_KEY = 'claude-webui-todo-size';
         var isDragging = false;
+        var isResizing = false;
         var dragOffset = { x: 0, y: 0 };
+        var resizeStart = { x: 0, y: 0, w: 0, h: 0 };
 
         function isDark() { return document.documentElement.classList.contains('dark'); }
 
@@ -2682,6 +2702,13 @@
         }
         function savePos(top, left) {
           localStorage.setItem(POS_KEY, JSON.stringify({ top: top, left: left }));
+        }
+        function getSavedSize() {
+          try { return JSON.parse(localStorage.getItem(SIZE_KEY)) || { w: 260, h: 360 }; }
+          catch { return { w: 260, h: 360 }; }
+        }
+        function saveSize(w, h) {
+          localStorage.setItem(SIZE_KEY, JSON.stringify({ w: w, h: h }));
         }
 
         var statusIcons = {
@@ -2696,7 +2723,8 @@
           var pos = getPos();
           panelEl = document.createElement('div');
           panelEl.id = 'todo-float-panel';
-          panelEl.style.cssText = 'position:fixed;top:' + pos.top + 'px;left:' + pos.left + 'px;z-index:99999;width:260px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15);' +
+          var savedSize = getSavedSize();
+          panelEl.style.cssText = 'position:fixed;top:' + pos.top + 'px;left:' + pos.left + 'px;z-index:99999;width:' + savedSize.w + 'px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15);overflow:hidden;' +
             (dark ? 'background:#1e293b;color:#e2e8f0;border:1px solid #334155;' : 'background:#fff;color:#1e293b;border:1px solid #e2e8f0;');
           document.body.appendChild(panelEl);
           renderPanel();
@@ -2711,7 +2739,10 @@
 
           var html = '<div style="padding:8px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid ' + (dark ? '#334155' : '#e2e8f0') + ';cursor:grab;user-select:none;" id="todo-panel-header">';
           html += '<span style="font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px;pointer-events:none;">\uD83D\uDCCB Tasks <span style="font-weight:400;opacity:0.6;">' + completed + '/' + total + '</span></span>';
+          html += '<div style="display:flex;align-items:center;gap:4px;">';
           html += '<span style="font-size:10px;opacity:0.5;pointer-events:none;">' + (panelCollapsed ? '\u25B6' : '\u25BC') + '</span>';
+          html += '<button id="todo-close-btn" style="border:none;background:none;cursor:pointer;font-size:14px;padding:0 2px;line-height:1;opacity:0.4;' + (dark ? 'color:#e2e8f0;' : 'color:#1e293b;') + '">&times;</button>';
+          html += '</div>';
           html += '</div>';
 
           if (!panelCollapsed) {
@@ -2722,7 +2753,8 @@
             html += '</div></div>';
 
             // Todo items
-            html += '<div style="padding:0 12px 8px;max-height:300px;overflow-y:auto;">';
+            var savedSize = getSavedSize();
+            html += '<div style="padding:0 12px 8px;max-height:' + (savedSize.h - 60) + 'px;overflow-y:auto;">';
             for (var i = 0; i < currentTodos.length; i++) {
               var t = currentTodos[i];
               var icon = statusIcons[t.status] || '\u2B55';
@@ -2741,7 +2773,13 @@
             html += '</div>';
           }
 
+          // Resize handle
+          if (!panelCollapsed) {
+            html += '<div id="todo-resize-handle" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;display:flex;align-items:center;justify-content:center;opacity:0.3;font-size:10px;user-select:none;">&#x25E2;</div>';
+          }
+
           panelEl.innerHTML = html;
+          panelEl.style.position = 'fixed'; // ensure resize handle positions correctly
 
           // Drag + collapse on header
           var header = panelEl.querySelector('#todo-panel-header');
@@ -2756,30 +2794,74 @@
               e.preventDefault();
             });
           }
+
+          // Resize handle
+          var resizeHandle = panelEl.querySelector('#todo-resize-handle');
+          if (resizeHandle) {
+            resizeHandle.addEventListener('mousedown', function(e) {
+              isResizing = true;
+              resizeStart.x = e.clientX;
+              resizeStart.y = e.clientY;
+              resizeStart.w = panelEl.offsetWidth;
+              resizeStart.h = panelEl.offsetHeight;
+              e.preventDefault();
+              e.stopPropagation();
+            });
+          }
+
+          // Close button
+          var closeBtn = panelEl.querySelector('#todo-close-btn');
+          if (closeBtn) {
+            closeBtn.addEventListener('click', function(e) {
+              e.stopPropagation();
+              removePanel();
+            });
+          }
         }
 
-        // Global drag handlers
+        // Global drag + resize handlers
         document.addEventListener('mousemove', function(e) {
-          if (!isDragging || !panelEl) return;
-          var newLeft = e.clientX - dragOffset.x;
-          var newTop = e.clientY - dragOffset.y;
-          newLeft = Math.max(0, Math.min(window.innerWidth - 100, newLeft));
-          newTop = Math.max(0, Math.min(window.innerHeight - 40, newTop));
-          panelEl.style.left = newLeft + 'px';
-          panelEl.style.top = newTop + 'px';
+          if (!panelEl) return;
+          if (isResizing) {
+            var newW = Math.max(200, resizeStart.w + (e.clientX - resizeStart.x));
+            var newH = Math.max(120, resizeStart.h + (e.clientY - resizeStart.y));
+            panelEl.style.width = newW + 'px';
+            // Update inner scroll area height
+            var scrollArea = panelEl.querySelector('div[style*="overflow-y"]');
+            if (scrollArea) scrollArea.style.maxHeight = (newH - 60) + 'px';
+            return;
+          }
+          if (isDragging) {
+            var newLeft = e.clientX - dragOffset.x;
+            var newTop = e.clientY - dragOffset.y;
+            newLeft = Math.max(0, Math.min(window.innerWidth - 100, newLeft));
+            newTop = Math.max(0, Math.min(window.innerHeight - 40, newTop));
+            panelEl.style.left = newLeft + 'px';
+            panelEl.style.top = newTop + 'px';
+          }
         });
         document.addEventListener('mouseup', function(e) {
-          if (!isDragging || !panelEl) return;
-          isDragging = false;
-          var header = panelEl.querySelector('#todo-panel-header');
-          if (header) header.style.cursor = 'grab';
-          savePos(parseInt(panelEl.style.top), parseInt(panelEl.style.left));
-          // If mouse barely moved, treat as click (toggle collapse)
-          var dx = Math.abs(e.clientX - dragOffset.startX);
-          var dy = Math.abs(e.clientY - dragOffset.startY);
-          if (dx < 5 && dy < 5) {
-            panelCollapsed = !panelCollapsed;
-            renderPanel();
+          if (!panelEl) return;
+          if (isResizing) {
+            isResizing = false;
+            var newW = panelEl.offsetWidth;
+            var scrollArea = panelEl.querySelector('div[style*="overflow-y"]');
+            var newH = scrollArea ? parseInt(scrollArea.style.maxHeight) + 60 : 360;
+            saveSize(newW, newH);
+            return;
+          }
+          if (isDragging) {
+            isDragging = false;
+            var header = panelEl.querySelector('#todo-panel-header');
+            if (header) header.style.cursor = 'grab';
+            savePos(parseInt(panelEl.style.top), parseInt(panelEl.style.left));
+            // If mouse barely moved, treat as click (toggle collapse)
+            var dx = Math.abs(e.clientX - dragOffset.startX);
+            var dy = Math.abs(e.clientY - dragOffset.startY);
+            if (dx < 5 && dy < 5) {
+              panelCollapsed = !panelCollapsed;
+              renderPanel();
+            }
           }
         });
 
