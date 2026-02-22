@@ -18,6 +18,12 @@
       /* Firefox */
       #root * { scrollbar-width: thin; scrollbar-color: #f97316 transparent; }
       .dark #root * { scrollbar-color: #c2410c transparent; }
+      /* Hide React's entire Thinking message bubble — replaced by centered overlay.
+         Targets the message container that has a spinner + "Thinking..." inside it.
+         Once React removes the animate-pulse span (response starts), CSS stops matching and content shows. */
+      div:has(> div > span.animate-pulse) {
+        display: none !important;
+      }
     </style>
     <script>
       // Prevent flash of unstyled content by setting theme class early
@@ -45,8 +51,18 @@
       // Tab renaming - press F2 or use Tools panel
       // Priority: manual name > auto-detected project > default
       (function() {
-        var MANUAL_KEY = 'claude-tab-name-' + window.location.pathname;
+        // Unique tab ID: lives in sessionStorage (per-tab, survives refresh)
+        // Manual name: lives in localStorage keyed by tab ID (persistent + per-tab)
+        var TAB_ID = sessionStorage.getItem('claude-tab-id');
+        if (!TAB_ID) {
+          TAB_ID = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+          sessionStorage.setItem('claude-tab-id', TAB_ID);
+        }
+        var MANUAL_KEY = 'claude-tab-name-' + TAB_ID;
         var AUTO_KEY = 'claude-tab-autoname-' + window.location.pathname;
+        // Expose for other scripts to check
+        window.__manualTabKey = MANUAL_KEY;
+
         var manualName = localStorage.getItem(MANUAL_KEY);
         var autoName = localStorage.getItem(AUTO_KEY);
         if (manualName) document.title = manualName;
@@ -747,8 +763,10 @@
             var val = input.value.trim();
             saveTitle(sessionId, val);
             input.style.width = Math.max(120, (val.length || 18) * 7.5) + 'px';
-            // Update tab title
-            document.title = (val ? val + ' ' : '') + '[' + sessionId + '] Claude Code';
+            // Update tab title (but never override manual rename)
+            if (!(window.__manualTabKey && localStorage.getItem(window.__manualTabKey))) {
+              document.title = (val ? val + ' ' : '') + '[' + sessionId + '] Claude Code';
+            }
           };
           input.oninput = function() {
             input.style.width = Math.max(120, (input.value.length || 18) * 7.5) + 'px';
@@ -1455,6 +1473,7 @@
         var _scrollRAF = null;
         var _lastContainer = null;
         var _scrollListener = null;
+        var _lastScrollHeight = 0;
 
         function setupScrollObserver() {
           if (scrollObserver) scrollObserver.disconnect();
@@ -1490,15 +1509,21 @@
               _scrollRAF = null;
               var c = getChatContainer();
               if (!c) return;
-              _programmaticScroll = true;
+              var currentHeight = c.scrollHeight;
               if (isAutoScroll()) {
-                _savedScrollTop = null;
-                c.scrollTop = c.scrollHeight;
+                // Only scroll to bottom when content actually grew (new messages)
+                if (currentHeight > _lastScrollHeight) {
+                  _programmaticScroll = true;
+                  _savedScrollTop = null;
+                  c.scrollTop = currentHeight;
+                  _lastScrollHeight = currentHeight;
+                  requestAnimationFrame(function() { _programmaticScroll = false; });
+                }
               } else if (_savedScrollTop !== null) {
+                _programmaticScroll = true;
                 c.scrollTop = _savedScrollTop;
+                requestAnimationFrame(function() { _programmaticScroll = false; });
               }
-              // Clear programmatic flag after browser processes the scroll
-              requestAnimationFrame(function() { _programmaticScroll = false; });
             });
           });
           scrollObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -1529,6 +1554,7 @@
             if (!wasOn) {
               // Turning ON — scroll to bottom and clear lock
               _savedScrollTop = null;
+              _lastScrollHeight = 0;
               scrollToBottom();
             } else {
               // Turning OFF — save current position to lock it
@@ -2215,13 +2241,17 @@
                 lastSeenSession = bestId;
                 saveSession(bestId);
                 // Update browser tab title with session ID (and custom name if set)
-                var shortId = bestId.substring(0, 8);
-                try {
-                  var titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
-                  var customName = titles[bestId] || titles[shortId] || '';
-                  document.title = (customName ? customName + ' ' : '') + '[' + shortId + '] Claude Code';
-                } catch(e2) {
-                  document.title = '[' + shortId + '] Claude Code';
+                // But never override a manual tab rename (F2)
+                var manualTabName = window.__manualTabKey && localStorage.getItem(window.__manualTabKey);
+                if (!manualTabName) {
+                  var shortId = bestId.substring(0, 8);
+                  try {
+                    var titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
+                    var customName = titles[bestId] || titles[shortId] || '';
+                    document.title = (customName ? customName + ' ' : '') + '[' + shortId + '] Claude Code';
+                  } catch(e2) {
+                    document.title = '[' + shortId + '] Claude Code';
+                  }
                 }
                 console.log('[Session Restore] Saved session:', bestId);
               }
@@ -2244,11 +2274,13 @@
           var onHistoryNow = window.location.search.indexOf('view=history') !== -1;
           if (onHistoryNow && !_wasOnHistoryView) {
             _wasOnHistoryView = true;
-            // Scroll history list to top when entering
-            setTimeout(function() {
+            // Scroll history list to top when entering (multiple attempts for reliability)
+            var topAttempts = 0;
+            var topTimer = setInterval(function() {
               var container = window.__getChatContainer ? window.__getChatContainer() : null;
-              if (container) container.scrollTop = 0;
-            }, 300);
+              if (container) { container.scrollTop = 0; }
+              if (++topAttempts >= 8) clearInterval(topTimer);
+            }, 200);
           }
           if (onHistoryNow) { _wasOnHistoryView = true; }
           if (currentUrl !== _lastUrl) {
@@ -2407,18 +2439,109 @@
       })();
     </script>
 
-    <!-- Thinking progress indicator -->
+    <!-- History view: session renaming -->
+    <script>
+      (function() {
+        var TITLES_KEY = 'claude-webui-session-titles';
+        function getTitles() {
+          try { return JSON.parse(localStorage.getItem(TITLES_KEY)) || {}; }
+          catch(e) { return {}; }
+        }
+        function saveTitle(id, title) {
+          var t = getTitles();
+          if (title) t[id] = title; else delete t[id];
+          localStorage.setItem(TITLES_KEY, JSON.stringify(t));
+        }
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function injectHistoryRenames() {
+          if (window.location.search.indexOf('view=history') === -1) return;
+
+          // React renders each session card as:
+          //   <div onClick=...>
+          //     <p class="text-sm font-medium ...">Session: a1b2c3d4...</p>
+          //     <p class="text-xs ...">Started: ... | Last: ...</p>
+          //   </div>
+          // Find the "Session: xxxxxxxx..." paragraphs
+          var sessionPs = document.querySelectorAll('p.text-sm');
+          var dark = isDark();
+          var titles = getTitles();
+
+          for (var i = 0; i < sessionPs.length; i++) {
+            var p = sessionPs[i];
+            var text = (p.textContent || '').trim();
+            var match = text.match(/^Session:\s*([a-f0-9]{8})/);
+            if (!match) continue;
+            if (p.getAttribute('data-history-rename')) continue;
+            p.setAttribute('data-history-rename', '1');
+
+            var shortId = match[1];
+            var customName = titles[shortId] || '';
+
+            // Add a name badge before the "Session:" text
+            var badge = document.createElement('span');
+            badge.className = 'history-rename-badge';
+            badge.setAttribute('data-sid', shortId);
+            badge.style.cssText = 'display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:4px;margin-right:8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;cursor:pointer;' +
+              (dark
+                ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;'
+                : 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;');
+            badge.textContent = customName || 'rename';
+            badge.title = customName
+              ? customName + ' (' + shortId + ') \u2014 click to rename'
+              : 'Click to name this session';
+
+            // Style the badge differently if it has a name vs default
+            if (customName) {
+              badge.style.fontStyle = 'normal';
+            } else {
+              badge.style.fontStyle = 'italic';
+              badge.style.opacity = '0.7';
+            }
+
+            // Click to rename (stop propagation so card click doesn't navigate)
+            (function(sid, bdg, pEl) {
+              bdg.addEventListener('click', function(e) {
+                e.stopPropagation();
+                e.preventDefault();
+                var t = getTitles();
+                var current = t[sid] || '';
+                var newName = prompt('Name this session (leave blank to clear):', current);
+                if (newName === null) return;
+                newName = newName.trim();
+                saveTitle(sid, newName);
+                bdg.textContent = newName || 'rename';
+                if (newName) {
+                  bdg.style.fontStyle = 'normal';
+                  bdg.style.opacity = '1';
+                  bdg.title = newName + ' (' + sid + ') \u2014 click to rename';
+                } else {
+                  bdg.style.fontStyle = 'italic';
+                  bdg.style.opacity = '0.7';
+                  bdg.title = 'Click to name this session';
+                }
+              });
+            })(shortId, badge, p);
+
+            // Insert badge before the text content
+            p.insertBefore(badge, p.firstChild);
+          }
+        }
+
+        // Poll when on history view
+        setInterval(injectHistoryRenames, 500);
+      })();
+    </script>
+
+    <!-- Thinking progress indicator (SDK-driven) -->
     <script>
       (function() {
         var thinkingStartTime = null;
         var thinkingTimer = null;
-        var streamBytes = 0;
         var streamTokens = 0;
-        var lastChunkTime = null;
-        var lastHeartbeat = null;
+        var thinkingTokens = 0;
         var activeTool = null;
         var overlayEl = null;
-        var thinkingTokens = 0;
 
         function formatElapsed(ms) {
           var secs = Math.floor(ms / 1000);
@@ -2438,18 +2561,32 @@
           overlayEl = document.createElement('div');
           overlayEl.id = 'thinking-progress';
           var dark = document.documentElement.classList.contains('dark');
-          overlayEl.style.cssText = 'font-family:ui-monospace,monospace;font-size:11px;padding:3px 8px;border-radius:6px;display:inline-flex;align-items:center;gap:8px;margin-top:2px;flex-wrap:wrap;max-width:400px;' +
-            (dark ? 'color:#94a3b8;background:rgba(30,41,59,0.7);' : 'color:#64748b;background:rgba(241,245,249,0.8);');
+          // Center over the chat area (not viewport) by finding the textarea
+          var centerLeft = '50%';
+          var ta = document.querySelector('textarea');
+          if (ta) {
+            var rect = ta.getBoundingClientRect();
+            centerLeft = Math.round(rect.left + rect.width / 2) + 'px';
+          }
+          overlayEl.style.cssText = 'position:fixed;bottom:80px;left:' + centerLeft + ';transform:translateX(-50%);z-index:99999;font-family:ui-monospace,monospace;font-size:12px;padding:6px 16px;border-radius:10px;display:flex;align-items:center;gap:8px;max-width:420px;width:fit-content;box-shadow:0 2px 12px rgba(0,0,0,0.18);pointer-events:none;' +
+            (dark ? 'color:#94a3b8;background:rgba(30,41,59,0.97);border:1px solid #334155;' : 'color:#64748b;background:rgba(255,255,255,0.97);border:1px solid #e2e8f0;');
           overlayEl.innerHTML =
-            '<span class="elapsed">0s</span>' +
-            '<span class="dot" style="width:4px;height:4px;border-radius:50%;background:currentColor;opacity:0.5;animation:tpulse 1.5s infinite;"></span>' +
-            '<span class="tokens" style="opacity:0.7;"></span>' +
-            '<span class="tool-info" style="opacity:0.7;font-size:10px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>';
+            '<div style="width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:tspin 0.8s linear infinite;flex-shrink:0;"></div>' +
+            '<span style="opacity:0.8;">Thinking...</span>' +
+            '<span class="elapsed" style="font-weight:600;">0s</span>' +
+            '<span class="tokens" style="opacity:0.7;"></span>';
           if (!document.getElementById('thinking-progress-style')) {
             var style = document.createElement('style');
             style.id = 'thinking-progress-style';
-            style.textContent = '@keyframes tpulse{0%,100%{opacity:0.3}50%{opacity:1}}';
+            style.textContent = '@keyframes tspin{to{transform:rotate(360deg)}}';
             document.head.appendChild(style);
+          }
+        }
+
+        function showOverlay() {
+          if (!document.getElementById('thinking-progress')) {
+            createOverlay();
+            document.body.appendChild(overlayEl);
           }
         }
 
@@ -2458,7 +2595,6 @@
           var elapsed = Date.now() - thinkingStartTime;
           var elSpan = overlayEl.querySelector('.elapsed');
           var tokSpan = overlayEl.querySelector('.tokens');
-          var toolSpan = overlayEl.querySelector('.tool-info');
           if (elSpan) elSpan.textContent = formatElapsed(elapsed);
           if (tokSpan) {
             var parts = [];
@@ -2466,80 +2602,46 @@
             if (thinkingTokens > 0) parts.push('thought ' + formatTokens(thinkingTokens));
             tokSpan.textContent = parts.join(' \u00B7 ');
           }
-          if (toolSpan) toolSpan.textContent = activeTool ? '\u25B8 ' + activeTool : '';
-        }
-
-        function attachOverlay() {
-          var spans = document.querySelectorAll('span.animate-pulse');
-          for (var i = 0; i < spans.length; i++) {
-            if (spans[i].textContent === 'Thinking...') {
-              var parent = spans[i].parentElement;
-              if (parent && !parent.querySelector('#thinking-progress')) {
-                createOverlay();
-                parent.appendChild(overlayEl);
-              }
-              return true;
-            }
-          }
-          return false;
         }
 
         function startThinking() {
-          if (thinkingStartTime) return;
+          if (thinkingStartTime) return; // already showing
           thinkingStartTime = Date.now();
-          streamBytes = 0;
           streamTokens = 0;
           thinkingTokens = 0;
-          lastChunkTime = null;
           activeTool = null;
-          thinkingTimer = setInterval(function() {
-            if (!attachOverlay()) {
-              stopThinking();
-              return;
-            }
-            updateOverlay();
-          }, 500);
+          showOverlay();
+          thinkingTimer = setInterval(updateOverlay, 500);
         }
+
+        // Show indicator immediately when user submits (don't wait for SDK)
+        document.addEventListener('submit', function() { startThinking(); }, true);
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' && !e.shiftKey && e.target && e.target.tagName === 'TEXTAREA') {
+            startThinking();
+          }
+        }, true);
 
         function stopThinking() {
           thinkingStartTime = null;
-          streamBytes = 0;
           streamTokens = 0;
           thinkingTokens = 0;
           activeTool = null;
-          lastHeartbeat = null;
           if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
           if (overlayEl && overlayEl.parentNode) { overlayEl.remove(); }
           overlayEl = null;
         }
 
-        var thinkingObserver = new MutationObserver(function() {
-          var found = document.querySelector('span.animate-pulse');
-          if (found && found.textContent === 'Thinking...') {
-            startThinking();
-          } else if (thinkingStartTime) {
-            stopThinking();
-          }
-        });
-        window.addEventListener('load', function() {
-          thinkingObserver.observe(document.body, { childList: true, subtree: true });
-        });
-
+        // Exposed to SSE stream processor — called directly from SDK message types
         window.__thinkingProgress = {
-          onChunk: function(byteLen) {
-            if (thinkingStartTime) {
-              streamBytes += (byteLen || 0);
-              lastChunkTime = Date.now();
-            }
-          },
-          onHeartbeat: function() {
-            lastHeartbeat = Date.now();
-          },
+          // Called when sdk msg.data.type === 'assistant' (Claude starts responding)
+          start: function() { startThinking(); },
+          // Called when sdk msg.data.type === 'result' (response complete)
+          stop: function() { stopThinking(); },
           onToolUse: function(toolLabel) {
             activeTool = toolLabel;
           },
           onTokens: function(inputTokens, outputTokens) {
-            // From SDK usage data
             if (inputTokens) streamTokens = inputTokens;
             if (outputTokens && outputTokens > streamTokens) streamTokens = outputTokens;
           },
@@ -3137,6 +3239,7 @@
                 function pump() {
                   reader.read().then(function(result) {
                     if (result.done) {
+                      if (window.__thinkingProgress) window.__thinkingProgress.stop();
                       if (window.__messageQueue) window.__messageQueue.onStreamDone();
                       controller.close();
                       return;
@@ -3155,7 +3258,6 @@
                         var msg = JSON.parse(line);
                         // Filter out heartbeat messages (keep connection alive, not for React)
                         if (msg.type === 'heartbeat') {
-                          if (window.__thinkingProgress) window.__thinkingProgress.onHeartbeat();
                           continue;
                         }
                         if (msg.type === 'ask_user_question') {
@@ -3176,19 +3278,28 @@
                             window.__currentFullSessionId = sd.session_id;
                             console.log('[Session] Full session ID:', sd.session_id);
                             // Update tab title with new session ID (important for forks)
-                            var shortSid = sd.session_id.substring(0, 8);
-                            try {
-                              var _titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
-                              var _name = _titles[sd.session_id] || _titles[shortSid] || '';
-                              document.title = (_name ? _name + ' ' : '') + '[' + shortSid + '] Claude Code';
-                            } catch(e3) {
-                              document.title = '[' + shortSid + '] Claude Code';
+                            // But never override manual tab rename (F2)
+                            if (!(window.__manualTabKey && localStorage.getItem(window.__manualTabKey))) {
+                              var shortSid = sd.session_id.substring(0, 8);
+                              try {
+                                var _titles = JSON.parse(localStorage.getItem('claude-webui-session-titles') || '{}');
+                                var _name = _titles[sd.session_id] || _titles[shortSid] || '';
+                                document.title = (_name ? _name + ' ' : '') + '[' + shortSid + '] Claude Code';
+                              } catch(e3) {
+                                document.title = '[' + shortSid + '] Claude Code';
+                              }
                             }
                           }
 
-                          // Extract token/usage data from result messages
-                          if (tp && sd.type === 'result' && sd.usage) {
-                            tp.onTokens(sd.usage.input_tokens, sd.usage.output_tokens);
+                          // SDK-driven thinking indicator:
+                          // 'assistant' = Claude starts responding → show indicator
+                          // 'result' = response complete → hide indicator
+                          if (sd.type === 'assistant') {
+                            if (tp) tp.start();
+                          }
+                          if (sd.type === 'result') {
+                            if (tp && sd.usage) tp.onTokens(sd.usage.input_tokens, sd.usage.output_tokens);
+                            if (tp) tp.stop();
                           }
 
                           // Process assistant message content blocks
@@ -3230,11 +3341,11 @@
                         } catch(te) {}
                       }
                       // Forward all other lines to React
-                      if (window.__thinkingProgress) window.__thinkingProgress.onChunk(line.length);
                       controller.enqueue(new TextEncoder().encode(line + '\n'));
                     }
                     pump();
                   }).catch(function(err) {
+                    if (window.__thinkingProgress) window.__thinkingProgress.stop();
                     controller.error(err);
                   });
                 }
