@@ -1451,31 +1451,57 @@
 
         var scrollObserver = null;
         var _savedScrollTop = null;
+        var _programmaticScroll = false;
+        var _scrollRAF = null;
+        var _lastContainer = null;
+        var _scrollListener = null;
+
         function setupScrollObserver() {
           if (scrollObserver) scrollObserver.disconnect();
+
+          // Track user scroll position via scroll events (not polling)
+          function attachScrollListener(container) {
+            if (_lastContainer === container) return;
+            if (_lastContainer && _scrollListener) {
+              _lastContainer.removeEventListener('scroll', _scrollListener);
+            }
+            _lastContainer = container;
+            _scrollListener = function() {
+              // Only save position from user-initiated scrolls
+              if (!_programmaticScroll && !isAutoScroll()) {
+                _savedScrollTop = container.scrollTop;
+              }
+            };
+            container.addEventListener('scroll', _scrollListener, { passive: true });
+          }
+
           scrollObserver = new MutationObserver(function() {
             // Don't auto-scroll on history view or other non-chat pages
             if (window.location.search.indexOf('view=') !== -1) return;
             var container = getChatContainer();
             if (!container) return;
-            if (isAutoScroll()) {
-              _savedScrollTop = null;
-              container.scrollTop = container.scrollHeight;
-            } else {
-              // When auto-scroll is OFF, lock the scroll position
-              if (_savedScrollTop !== null) {
-                container.scrollTop = _savedScrollTop;
+
+            // Attach scroll listener if not already
+            attachScrollListener(container);
+
+            // Batch scroll corrections via rAF to avoid fighting with browser
+            if (_scrollRAF) return;
+            _scrollRAF = requestAnimationFrame(function() {
+              _scrollRAF = null;
+              var c = getChatContainer();
+              if (!c) return;
+              _programmaticScroll = true;
+              if (isAutoScroll()) {
+                _savedScrollTop = null;
+                c.scrollTop = c.scrollHeight;
+              } else if (_savedScrollTop !== null) {
+                c.scrollTop = _savedScrollTop;
               }
-            }
+              // Clear programmatic flag after browser processes the scroll
+              requestAnimationFrame(function() { _programmaticScroll = false; });
+            });
           });
           scrollObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-          // Track manual scrolling so we know where to lock
-          setInterval(function() {
-            if (!isAutoScroll()) {
-              var container = getChatContainer();
-              if (container) _savedScrollTop = container.scrollTop;
-            }
-          }, 200);
         }
 
         function render() {
