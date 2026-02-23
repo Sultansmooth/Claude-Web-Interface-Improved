@@ -2898,7 +2898,34 @@
           queueBadge.innerHTML = html;
         }
 
-        // Intercept Enter key on textarea during processing to queue
+        // Inject message mid-stream via backend API (like CLI's queued messages)
+        function injectMessage(text) {
+          var reqId = window.__currentRequestId;
+          if (!reqId) {
+            console.warn('[MsgQueue] No active requestId, falling back to queue');
+            messageQueue.push(text);
+            updateQueueBadge();
+            return;
+          }
+          console.log('[MsgQueue] Injecting mid-stream:', text.substring(0, 80));
+          fetch('/api/inject/' + encodeURIComponent(reqId), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text })
+          }).then(function(resp) {
+            if (!resp.ok) {
+              console.warn('[MsgQueue] Inject failed, falling back to queue');
+              messageQueue.push(text);
+              updateQueueBadge();
+            }
+          }).catch(function() {
+            console.warn('[MsgQueue] Inject error, falling back to queue');
+            messageQueue.push(text);
+            updateQueueBadge();
+          });
+        }
+
+        // Intercept Enter key on textarea during processing to inject mid-stream
         document.addEventListener('keydown', function(e) {
           if (e.key !== 'Enter' || e.shiftKey) return;
           if (!isProcessing) return;
@@ -2913,16 +2940,17 @@
           e.stopPropagation();
           e.stopImmediatePropagation();
 
-          messageQueue.push(val);
+          // Inject directly into the active stream
+          injectMessage(val);
+
           ta.value = '';
           // Fire input event so React updates its state
           ta.dispatchEvent(new Event('input', { bubbles: true }));
-          ta.placeholder = 'Queued: ' + messageQueue.length + ' message(s)... type another or press Enter';
-          updateQueueBadge();
-          console.log('[MsgQueue] Queued message:', val, 'Total:', messageQueue.length);
+          ta.placeholder = isProcessing ? 'Type to send mid-stream...' : 'Type a message...';
+          console.log('[MsgQueue] Injected message:', val);
         }, true); // capture phase to beat React
 
-        // When processing ends, send queued messages
+        // Fallback: when processing ends, send any remaining queued messages
         function onProcessingDone() {
           isProcessing = false;
           if (messageQueue.length === 0) return;
@@ -2933,24 +2961,26 @@
             updateQueueBadge();
             if (!nextMsg) return;
 
-            console.log('[MsgQueue] Sending queued message:', nextMsg);
+            console.log('[MsgQueue] Sending fallback queued message:', nextMsg);
 
             // Set the textarea value and trigger React's submit
             var ta = document.querySelector('textarea.rounded-xl') ||
                      document.querySelector('textarea');
             if (ta) {
-              // Set value through native setter to trigger React's onChange
               var nativeSetter = Object.getOwnPropertyDescriptor(
                 window.HTMLTextAreaElement.prototype, 'value'
               ).set;
               nativeSetter.call(ta, nextMsg);
               ta.dispatchEvent(new Event('input', { bubbles: true }));
 
-              // Submit the form
               setTimeout(function() {
                 var form = ta.closest('form');
                 if (form) {
                   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                  setTimeout(function() {
+                    nativeSetter.call(ta, '');
+                    ta.dispatchEvent(new Event('input', { bubbles: true }));
+                  }, 50);
                 }
               }, 100);
             }

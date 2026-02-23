@@ -2169,6 +2169,10 @@ import { z } from "zod/v3";
 var globalPendingAnswers = /* @__PURE__ */ new Map();
 var questionIdCounter = 0;
 
+// Global map: requestId -> { queue: [], resolve: null }
+// Used for mid-stream message injection (like CLI's queued messages)
+var globalMessageQueues = /* @__PURE__ */ new Map();
+
 async function* executeClaudeCommand(message, requestId, requestAbortControllers, cliPath, sessionId, allowedTools, workingDirectory, permissionMode, injectMessage) {
   let abortController;
   try {
@@ -2236,19 +2240,44 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
     const closePromptPromise = new Promise((resolve) => { closePrompt = resolve; });
 
     // Streaming prompt generator - stays open for MCP control channel until result
+    // Also yields mid-stream injected messages (like CLI's queued messages)
+    const msgQueue = { queue: [], resolve: null };
+    globalMessageQueues.set(requestId, msgQueue);
+
     async function* streamingPrompt() {
       yield {
         type: "user",
         message: { role: "user", content: processedMessage },
         parent_tool_use_id: null
       };
-      // Keep stream open until we receive a result message or abort
-      await Promise.race([
-        closePromptPromise,
-        new Promise((resolve) => {
-          abortController.signal.addEventListener("abort", resolve);
-        })
-      ]);
+      // Loop: wait for close/abort OR injected messages
+      while (true) {
+        const result = await Promise.race([
+          closePromptPromise.then(() => ({ action: "close" })),
+          new Promise((resolve) => {
+            abortController.signal.addEventListener("abort", () => resolve({ action: "abort" }), { once: true });
+          }),
+          new Promise((resolve) => {
+            // If there are already queued messages, resolve immediately
+            if (msgQueue.queue.length > 0) {
+              resolve({ action: "message", text: msgQueue.queue.shift() });
+            } else {
+              // Wait for next injected message
+              msgQueue.resolve = (text) => resolve({ action: "message", text });
+            }
+          })
+        ]);
+
+        if (result.action === "close" || result.action === "abort") break;
+        if (result.action === "message") {
+          logger.chat.debug("Injecting mid-stream message: " + result.text.substring(0, 80));
+          yield {
+            type: "user",
+            message: { role: "user", content: result.text },
+            parent_tool_use_id: null
+          };
+        }
+      }
     }
 
     for await (const sdkMessage of query({
@@ -2296,6 +2325,7 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       requestAbortControllers.delete(requestId);
     }
     globalPendingAnswers.delete(requestId);
+    globalMessageQueues.delete(requestId);
   }
 }
 async function handleChatRequest(c, requestAbortControllers) {
@@ -2606,6 +2636,29 @@ function createApp(runtime2, config) {
     }
   });
   // Endpoint for frontend to submit answers to AskUserQuestion
+  // Inject a user message mid-stream (like CLI's queued messages)
+  app.post("/api/inject/:requestId", async (c) => {
+    const requestId = c.req.param("requestId");
+    const { message } = await c.req.json();
+    if (!message || typeof message !== "string") {
+      return c.json({ error: "message string is required" }, 400);
+    }
+    const msgQueue = globalMessageQueues.get(requestId);
+    if (!msgQueue) {
+      return c.json({ error: "Request not found or already completed" }, 404);
+    }
+    logger.api.debug(`Injecting message for request: ${requestId}: ${message.substring(0, 80)}`);
+    if (msgQueue.resolve) {
+      // Generator is waiting — resolve it immediately
+      const resolve = msgQueue.resolve;
+      msgQueue.resolve = null;
+      resolve(message);
+    } else {
+      // Generator is busy — queue it for next iteration
+      msgQueue.queue.push(message);
+    }
+    return c.json({ success: true });
+  });
   app.post("/api/answer/:requestId", async (c) => {
     const requestId = c.req.param("requestId");
     const { questionId, answers } = await c.req.json();
