@@ -2925,6 +2925,49 @@
           });
         }
 
+        // Track injected messages for badge display
+        var injectedMessages = [];
+
+        function updateBadgeWithInjected() {
+          // Show both queued and injected messages in badge
+          var allMessages = injectedMessages.concat(messageQueue);
+          if (allMessages.length === 0) {
+            if (queueBadge) { queueBadge.remove(); queueBadge = null; }
+            return;
+          }
+          if (!queueBadge) {
+            queueBadge = document.createElement('div');
+            queueBadge.id = 'msg-queue-badge';
+            document.body.appendChild(queueBadge);
+          }
+          var dark = isDark();
+          queueBadge.style.cssText = 'position:fixed;bottom:62px;right:20px;z-index:100000;padding:6px 12px;border-radius:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:11px;font-weight:500;max-width:340px;' +
+            (dark ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;' : 'background:#eff6ff;color:#1d4ed8;border:1px solid #93c5fd;');
+          var html = '';
+          for (var i = 0; i < allMessages.length; i++) {
+            var msg = allMessages[i];
+            var label = i < injectedMessages.length ? 'sent' : 'queued';
+            var num = i + 1;
+            html += '<div style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;' + (i > 0 ? 'border-top:1px solid ' + (dark ? 'rgba(59,130,246,0.2)' : 'rgba(29,78,216,0.1)') + ';' : '') + '">';
+            html += '<span style="flex-shrink:0;font-size:10px;opacity:0.5;margin-top:1px;">' + label + '</span>';
+            html += '<span style="font-family:ui-monospace,monospace;font-size:10px;opacity:0.8;line-height:1.4;word-break:break-word;">' + escapeHtml(truncate(msg, 80)) + '</span>';
+            html += '</div>';
+          }
+          queueBadge.innerHTML = html;
+          // Auto-clear injected messages from badge after 5s
+          if (injectedMessages.length > 0) {
+            setTimeout(function() {
+              injectedMessages = [];
+              updateBadgeWithInjected();
+            }, 5000);
+          }
+        }
+
+        // Native setter for reliable textarea clearing
+        var _nativeTaSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value'
+        ).set;
+
         // Intercept Enter key on textarea during processing to inject mid-stream
         document.addEventListener('keydown', function(e) {
           if (e.key !== 'Enter' || e.shiftKey) return;
@@ -2943,10 +2986,14 @@
           // Inject directly into the active stream
           injectMessage(val);
 
-          ta.value = '';
-          // Fire input event so React updates its state
+          // Track for badge display
+          injectedMessages.push(val);
+          updateBadgeWithInjected();
+
+          // Clear textarea using native setter so React picks it up
+          _nativeTaSetter.call(ta, '');
           ta.dispatchEvent(new Event('input', { bubbles: true }));
-          ta.placeholder = isProcessing ? 'Type to send mid-stream...' : 'Type a message...';
+          ta.placeholder = 'Type to send mid-stream...';
           console.log('[MsgQueue] Injected message:', val);
         }, true); // capture phase to beat React
 
