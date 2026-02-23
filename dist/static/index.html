@@ -2709,11 +2709,16 @@
           }, 15000);
         }
 
+        // Read-only tools that are safe to repeat — skip loop detection for these
+        var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0 };
+
         window.__loopDetector = {
           // Called for each tool_use block in assistant messages
           onToolUse: function(block) {
             currentTurnHasContent = true;
             emptyAssistantCount = 0; // has content, not empty
+            // Skip read-only tools — repeating them is normal and harmless
+            if (block.name && SAFE_TOOLS[block.name]) return;
             var sig = getSignature(block);
             if (!sig) return;
             recentCalls.push(sig);
