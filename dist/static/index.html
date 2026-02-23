@@ -2777,13 +2777,26 @@
               emptyAssistantCount = 0;
             }
           },
-          // Reset on conversation turn end
+          // Reset when user sends a new message (fresh conversation turn)
           reset: function() {
             recentCalls = [];
             emptyAssistantCount = 0;
             currentTurnHasContent = false;
           }
         };
+
+        // Reset loop detector on user submit (new message = clean slate)
+        document.addEventListener('submit', function(e) {
+          var form = e.target;
+          if (form && form.querySelector && form.querySelector('textarea')) {
+            var ta = form.querySelector('textarea');
+            if (ta && ta.value && ta.value.trim().length > 0) {
+              recentCalls = [];
+              emptyAssistantCount = 0;
+              currentTurnHasContent = false;
+            }
+          }
+        }, true);
       })();
     </script>
 
@@ -3434,7 +3447,8 @@
                           if (sd.type === 'result') {
                             if (tp && sd.usage) tp.onTokens(sd.usage.input_tokens, sd.usage.output_tokens);
                             if (tp) tp.stop();
-                            if (window.__loopDetector) window.__loopDetector.reset();
+                            // Don't reset loop detector on result — tool history must persist
+                            // across turns to catch cross-turn loops like ExitPlanMode repeating
                           }
 
                           // Process assistant message content blocks
