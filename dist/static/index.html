@@ -2670,7 +2670,12 @@
           var sig = block.name || '';
           if (block.input) {
             if (block.input.command) sig += '::' + block.input.command;
-            else if (block.input.file_path) sig += '::' + block.input.file_path;
+            else if (block.input.file_path) {
+              sig += '::' + block.input.file_path;
+              // For Edit/Write, include content snippet so different edits to same file aren't flagged
+              if (block.input.old_string) sig += '::' + block.input.old_string.substring(0, 40);
+              else if (block.input.content) sig += '::' + block.input.content.substring(0, 40);
+            }
             else if (block.input.pattern) sig += '::' + block.input.pattern;
           }
           return sig;
