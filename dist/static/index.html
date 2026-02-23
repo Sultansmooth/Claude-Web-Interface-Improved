@@ -3453,6 +3453,28 @@
                           continue;
                         }
                       } catch(e) {}
+                      // Deduplicate plan mode messages — prevent popup from resetting
+                      // while user is actively interacting with it
+                      if (msg && msg.type === 'claude_json' && msg.data &&
+                          msg.data.type === 'assistant' && msg.data.message && msg.data.message.content) {
+                        var hasPlanTool = false;
+                        for (var pi = 0; pi < msg.data.message.content.length; pi++) {
+                          var pb = msg.data.message.content[pi];
+                          if (pb.type === 'tool_use' && (pb.name === 'ExitPlanMode' || pb.name === 'EnterPlanMode')) {
+                            hasPlanTool = true;
+                            break;
+                          }
+                        }
+                        if (hasPlanTool) {
+                          if (!window.__lastPlanMsgId) window.__lastPlanMsgId = null;
+                          var planMsgId = msg.data.message.id || JSON.stringify(msg.data.message.content).substring(0, 200);
+                          if (window.__lastPlanMsgId === planMsgId) {
+                            console.log('[PlanDedup] Skipping duplicate plan message');
+                            continue; // don't forward to React
+                          }
+                          window.__lastPlanMsgId = planMsgId;
+                        }
+                      }
                       // Extract data from SDK messages
                       if (msg && msg.type === 'claude_json' && msg.data) {
                         try {
