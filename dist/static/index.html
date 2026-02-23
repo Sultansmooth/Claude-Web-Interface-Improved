@@ -2718,6 +2718,7 @@
             if (!sig) return;
             recentCalls.push(sig);
             if (recentCalls.length > MAX_HISTORY) recentCalls.shift();
+            // Check 1: same tool repeated consecutively (A-A-A)
             if (recentCalls.length >= TOOL_LOOP_THRESHOLD) {
               var last = recentCalls[recentCalls.length - 1];
               var repeats = 0;
@@ -2728,6 +2729,29 @@
               if (repeats >= TOOL_LOOP_THRESHOLD) {
                 var shortSig = last.length > 60 ? last.substring(0, 60) + '...' : last;
                 showWarning(shortSig + ' repeated ' + repeats + ' times', true);
+                return;
+              }
+            }
+            // Check 2: repeating cycle pattern (A-B-A-B or A-B-C-A-B-C)
+            if (recentCalls.length >= 4) {
+              for (var pLen = 2; pLen <= 3; pLen++) {
+                if (recentCalls.length >= pLen * TOOL_LOOP_THRESHOLD) {
+                  var pattern = recentCalls.slice(recentCalls.length - pLen);
+                  var cycles = 0;
+                  var matched = true;
+                  for (var c = 0; c < TOOL_LOOP_THRESHOLD; c++) {
+                    for (var p = 0; p < pLen; p++) {
+                      var idx = recentCalls.length - 1 - (c * pLen) - (pLen - 1 - p);
+                      if (idx < 0 || recentCalls[idx] !== pattern[p]) { matched = false; break; }
+                    }
+                    if (!matched) break;
+                    cycles++;
+                  }
+                  if (matched && cycles >= TOOL_LOOP_THRESHOLD) {
+                    showWarning('Repeating cycle: ' + pattern.join(' → ').substring(0, 80) + ' (' + cycles + 'x)', true);
+                    return;
+                  }
+                }
               }
             }
           },
