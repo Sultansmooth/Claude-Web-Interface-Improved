@@ -2867,6 +2867,12 @@
         // Read-only tools that are safe to repeat — skip loop detection for these
         var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0, ExitPlanMode:1, EnterPlanMode:1, TodoWrite:1 };
 
+        // Commands that should never be retried — abort after just 2 attempts
+        // These are network/auth-dependent and retrying won't fix the issue
+        var NEVER_RETRY_CMDS = /\b(git\s+push|git\s+pull|git\s+fetch|npm\s+publish|docker\s+push)\b/;
+        var NEVER_RETRY_THRESHOLD = 2;
+        var neverRetryCount = {};
+
         window.__loopDetector = {
           // Called for each tool_use block in assistant messages
           onToolUse: function(block) {
@@ -2874,6 +2880,21 @@
             emptyAssistantCount = 0; // has content, not empty
             // Skip read-only tools — repeating them is normal and harmless
             if (block.name && SAFE_TOOLS[block.name]) return;
+
+            // Check 0: never-retry commands (git push, etc.) — abort after just 2 attempts
+            if (block.name === 'Bash' && block.input && block.input.command) {
+              var rawCmd = block.input.command.replace(/^(?:cd\s+[^\s&]+\s*&&\s*)+/, '').trim();
+              var nrMatch = rawCmd.match(NEVER_RETRY_CMDS);
+              if (nrMatch) {
+                var nrKey = nrMatch[1].replace(/\s+/g, ' ');
+                neverRetryCount[nrKey] = (neverRetryCount[nrKey] || 0) + 1;
+                if (neverRetryCount[nrKey] >= NEVER_RETRY_THRESHOLD) {
+                  showWarning('"' + nrKey + '" failed ' + neverRetryCount[nrKey] + ' times — likely an auth/network issue, ask user', true);
+                  return;
+                }
+              }
+            }
+
             var sig = getSignature(block);
             if (!sig) return;
             recentCalls.push(sig);
@@ -2965,6 +2986,7 @@
           reset: function() {
             recentCalls = [];
             recentCoarseCalls = [];
+            neverRetryCount = {};
             emptyAssistantCount = 0;
             currentTurnHasContent = false;
           }
