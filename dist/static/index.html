@@ -2642,15 +2642,13 @@
         // Track last stream activity to detect stale indicators
         var lastActivity = Date.now();
 
-        // Watchdog: auto-hide indicator if no stream activity for 30s
-        // This catches cases where stopThinking() was never called (dropped connections, etc.)
+        // Watchdog: auto-hide indicator if no stream activity for 15s
+        // This catches cases where stopThinking() was never called (dropped connections,
+        // tool_use_errors that hang the SDK, etc.)
         setInterval(function() {
           if (!thinkingStartTime) return;
           var idleMs = Date.now() - lastActivity;
-          // If textarea is enabled (not processing) and indicator is showing, it's stale
-          var ta = document.querySelector('textarea.rounded-xl') || document.querySelector('textarea');
-          var taEnabled = ta && !ta.disabled;
-          if (idleMs > 30000 || (idleMs > 5000 && taEnabled)) {
+          if (idleMs > 15000) {
             console.log('[ThinkingProgress] Stale indicator detected, auto-hiding (idle: ' + Math.round(idleMs/1000) + 's)');
             stopThinking();
           }
@@ -3717,6 +3715,11 @@
                         // Filter out heartbeat messages (keep connection alive, not for React)
                         if (msg.type === 'heartbeat') {
                           continue;
+                        }
+                        // Stop thinking indicator on stream errors or done
+                        if (msg.type === 'error' || msg.type === 'done') {
+                          if (window.__compactingIndicator) window.__compactingIndicator.hide();
+                          if (window.__thinkingProgress) window.__thinkingProgress.stop();
                         }
                         if (msg.type === 'ask_user_question') {
                           console.log('[AskUser] Question received:', msg);
