@@ -3675,8 +3675,8 @@
               if (bodyObj.requestId) {
                 currentRequestId = bodyObj.requestId;
                 console.log('[AskUser] Tracking requestId:', currentRequestId);
-                // Force-reset thinking indicator on new request (prevents stale timers)
-                if (window.__thinkingProgress) window.__thinkingProgress.stop();
+                // Reset thinking indicator timer on new request (keeps overlay visible, just resets elapsed)
+                if (window.__thinkingProgress) window.__thinkingProgress.start();
               }
             } catch(e) {}
           }
