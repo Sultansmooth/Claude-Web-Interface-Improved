@@ -2162,14 +2162,18 @@
             }
           }
           // Also handle plan mode approval dialogs
-          var planBtns = document.querySelectorAll('button');
-          for (var k = 0; k < planBtns.length; k++) {
-            var ptxt = planBtns[k].textContent || '';
-            if (ptxt.indexOf('Yes, and auto-accept edits') !== -1) {
-              var planContainer = planBtns[k].closest('.flex-shrink-0');
-              if (planContainer && planContainer.querySelector('p')?.textContent?.indexOf('Choose how to proceed') !== -1) {
-                console.log('[Auto-approve] Clicking: ' + ptxt);
-                planBtns[k].click();
+          // Look for the "Choose how to proceed" container first, then click the first button
+          var allPs = document.querySelectorAll('p');
+          for (var k = 0; k < allPs.length; k++) {
+            var pText = allPs[k].textContent || '';
+            if (pText.indexOf('Choose how to proceed') !== -1) {
+              var planContainer = allPs[k].closest('.flex-shrink-0');
+              if (!planContainer) continue;
+              var planBtns = planContainer.querySelectorAll('button');
+              if (planBtns.length > 0) {
+                // First button is "Yes, and auto-accept edits"
+                console.log('[Auto-approve] Plan mode: clicking "' + (planBtns[0].textContent || '').trim() + '"');
+                planBtns[0].click();
                 return;
               }
             }
@@ -2605,12 +2609,13 @@
         }
 
         function startThinking() {
-          if (thinkingStartTime) return; // already showing
+          // Always reset the timer on a new start (prevents stale elapsed times)
           thinkingStartTime = Date.now();
           streamTokens = 0;
           thinkingTokens = 0;
           activeTool = null;
           showOverlay();
+          if (thinkingTimer) clearInterval(thinkingTimer);
           thinkingTimer = setInterval(updateOverlay, 500);
         }
 
@@ -2618,7 +2623,9 @@
         document.addEventListener('submit', function() { startThinking(); }, true);
         document.addEventListener('keydown', function(e) {
           if (e.key === 'Enter' && !e.shiftKey && e.target && e.target.tagName === 'TEXTAREA') {
-            startThinking();
+            // Don't trigger thinking for queued/injected messages (isProcessing check)
+            var mqProcessing = window.__messageQueue && window.__messageQueue._isProcessing;
+            if (!mqProcessing) startThinking();
           }
         }, true);
 
@@ -2632,25 +2639,154 @@
           overlayEl = null;
         }
 
+        // Track last stream activity to detect stale indicators
+        var lastActivity = Date.now();
+
+        // Watchdog: auto-hide indicator if no stream activity for 30s
+        // This catches cases where stopThinking() was never called (dropped connections, etc.)
+        setInterval(function() {
+          if (!thinkingStartTime) return;
+          var idleMs = Date.now() - lastActivity;
+          // If textarea is enabled (not processing) and indicator is showing, it's stale
+          var ta = document.querySelector('textarea.rounded-xl') || document.querySelector('textarea');
+          var taEnabled = ta && !ta.disabled;
+          if (idleMs > 30000 || (idleMs > 5000 && taEnabled)) {
+            console.log('[ThinkingProgress] Stale indicator detected, auto-hiding (idle: ' + Math.round(idleMs/1000) + 's)');
+            stopThinking();
+          }
+        }, 3000);
+
         // Exposed to SSE stream processor — called directly from SDK message types
         window.__thinkingProgress = {
           // Called when sdk msg.data.type === 'assistant' (Claude starts responding)
-          start: function() { startThinking(); },
+          start: function() { lastActivity = Date.now(); startThinking(); },
           // Called when sdk msg.data.type === 'result' (response complete)
           stop: function() { stopThinking(); },
           onToolUse: function(toolLabel) {
+            lastActivity = Date.now();
             activeTool = toolLabel;
           },
           onTokens: function(inputTokens, outputTokens) {
+            lastActivity = Date.now();
             if (inputTokens) streamTokens = inputTokens;
             if (outputTokens && outputTokens > streamTokens) streamTokens = outputTokens;
           },
           addStreamTokens: function(count) {
+            lastActivity = Date.now();
             streamTokens += count;
           },
           addThinkingTokens: function(count) {
+            lastActivity = Date.now();
             thinkingTokens += count;
           }
+        };
+      })();
+    </script>
+
+    <!-- Compacting conversation indicator (orange) -->
+    <script>
+      (function() {
+        var isCompacting = false;
+        var compactingEl = null;
+        var compactStartTime = null;
+        var compactTimer = null;
+        var lastStreamMsgTime = Date.now();
+        var gapDetectorTimer = null;
+        var GAP_THRESHOLD_MS = 12000; // 12 seconds without a message = likely compacting
+
+        function isDark() { return document.documentElement.classList.contains('dark'); }
+
+        function formatElapsed(ms) {
+          var secs = Math.floor(ms / 1000);
+          if (secs < 60) return secs + 's';
+          var mins = Math.floor(secs / 60);
+          secs = secs % 60;
+          return mins + 'm ' + (secs < 10 ? '0' : '') + secs + 's';
+        }
+
+        function createCompactingOverlay() {
+          if (compactingEl) return;
+          compactingEl = document.createElement('div');
+          compactingEl.id = 'compacting-indicator';
+          var dark = isDark();
+          var centerLeft = '50%';
+          var ta = document.querySelector('textarea');
+          if (ta) {
+            var rect = ta.getBoundingClientRect();
+            centerLeft = Math.round(rect.left + rect.width / 2) + 'px';
+          }
+          compactingEl.style.cssText = 'position:fixed;bottom:110px;left:' + centerLeft + ';transform:translateX(-50%);z-index:100001;font-family:ui-monospace,monospace;font-size:13px;padding:8px 20px;border-radius:10px;display:flex;align-items:center;gap:10px;max-width:460px;width:fit-content;box-shadow:0 2px 16px rgba(0,0,0,0.22);pointer-events:none;transition:opacity 0.3s;' +
+            (dark
+              ? 'color:#fb923c;background:rgba(30,30,20,0.97);border:1px solid #92400e;'
+              : 'color:#ea580c;background:rgba(255,247,237,0.97);border:1px solid #f59e0b;');
+          compactingEl.innerHTML =
+            '<div style="width:16px;height:16px;border:2.5px solid #fb923c;border-top-color:transparent;border-radius:50%;animation:tspin 0.8s linear infinite;flex-shrink:0;"></div>' +
+            '<span style="font-weight:600;">Compacting conversation...</span>' +
+            '<span class="compact-elapsed" style="opacity:0.8;">0s</span>';
+        }
+
+        function showCompacting() {
+          if (isCompacting) return;
+          isCompacting = true;
+          compactStartTime = Date.now();
+          // Hide the thinking indicator if visible
+          var thinkEl = document.getElementById('thinking-progress');
+          if (thinkEl) thinkEl.style.display = 'none';
+          createCompactingOverlay();
+          if (compactingEl && !document.getElementById('compacting-indicator')) {
+            document.body.appendChild(compactingEl);
+          }
+          compactTimer = setInterval(function() {
+            if (!compactingEl || !compactStartTime) return;
+            var el = compactingEl.querySelector('.compact-elapsed');
+            if (el) el.textContent = formatElapsed(Date.now() - compactStartTime);
+          }, 500);
+          console.log('[Compacting] Indicator shown');
+        }
+
+        function hideCompacting() {
+          if (!isCompacting) return;
+          isCompacting = false;
+          compactStartTime = null;
+          if (compactTimer) { clearInterval(compactTimer); compactTimer = null; }
+          if (compactingEl && compactingEl.parentNode) {
+            compactingEl.remove();
+          }
+          compactingEl = null;
+          // Restore thinking indicator visibility
+          var thinkEl = document.getElementById('thinking-progress');
+          if (thinkEl) thinkEl.style.display = '';
+          console.log('[Compacting] Indicator hidden');
+        }
+
+        // Gap detector: if processing and no stream messages for GAP_THRESHOLD_MS, show compacting
+        function startGapDetector() {
+          if (gapDetectorTimer) return;
+          gapDetectorTimer = setInterval(function() {
+            if (!window.__thinkingProgress) return;
+            // Check if thinking overlay exists (means we're processing)
+            var thinkEl = document.getElementById('thinking-progress');
+            if (!thinkEl) { lastStreamMsgTime = Date.now(); return; }
+            var gap = Date.now() - lastStreamMsgTime;
+            if (gap >= GAP_THRESHOLD_MS && !isCompacting) {
+              showCompacting();
+            }
+          }, 2000);
+        }
+
+        // Track stream message timing
+        function onStreamMessage() {
+          lastStreamMsgTime = Date.now();
+          // If we were showing compacting from gap detection, hide it
+          if (isCompacting) hideCompacting();
+        }
+
+        window.addEventListener('load', startGapDetector);
+
+        window.__compactingIndicator = {
+          show: function() { showCompacting(); },
+          hide: function() { hideCompacting(); },
+          onStreamMessage: function() { onStreamMessage(); }
         };
       })();
     </script>
@@ -2715,7 +2851,7 @@
         }
 
         // Read-only tools that are safe to repeat — skip loop detection for these
-        var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0 };
+        var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0, ExitPlanMode:1, EnterPlanMode:1, TodoWrite:1 };
 
         window.__loopDetector = {
           // Called for each tool_use block in assistant messages
@@ -2991,6 +3127,9 @@
           updateBadgeWithInjected();
 
           // Clear textarea using native setter so React picks it up
+          // Reset React's _valueTracker so it doesn't de-duplicate the change
+          var tracker = ta._valueTracker;
+          if (tracker) { tracker.setValue(val); }
           _nativeTaSetter.call(ta, '');
           ta.dispatchEvent(new Event('input', { bubbles: true }));
           ta.placeholder = 'Type to send mid-stream...';
@@ -3017,6 +3156,8 @@
               var nativeSetter = Object.getOwnPropertyDescriptor(
                 window.HTMLTextAreaElement.prototype, 'value'
               ).set;
+              var tracker1 = ta._valueTracker;
+              if (tracker1) { tracker1.setValue(''); }
               nativeSetter.call(ta, nextMsg);
               ta.dispatchEvent(new Event('input', { bubbles: true }));
 
@@ -3025,6 +3166,8 @@
                 if (form) {
                   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
                   setTimeout(function() {
+                    var tracker2 = ta._valueTracker;
+                    if (tracker2) { tracker2.setValue(nextMsg); }
                     nativeSetter.call(ta, '');
                     ta.dispatchEvent(new Event('input', { bubbles: true }));
                   }, 50);
@@ -3036,7 +3179,8 @@
 
         // Expose for stream interceptor
         window.__messageQueue = {
-          onStreamDone: onProcessingDone
+          onStreamDone: onProcessingDone,
+          get _isProcessing() { return isProcessing; }
         };
       })();
     </script>
@@ -3455,6 +3599,8 @@
               if (bodyObj.requestId) {
                 currentRequestId = bodyObj.requestId;
                 console.log('[AskUser] Tracking requestId:', currentRequestId);
+                // Force-reset thinking indicator on new request (prevents stale timers)
+                if (window.__thinkingProgress) window.__thinkingProgress.stop();
               }
             } catch(e) {}
           }
@@ -3472,6 +3618,7 @@
                 function pump() {
                   reader.read().then(function(result) {
                     if (result.done) {
+                      if (window.__compactingIndicator) window.__compactingIndicator.hide();
                       if (window.__thinkingProgress) window.__thinkingProgress.stop();
                       if (window.__messageQueue) window.__messageQueue.onStreamDone();
                       controller.close();
@@ -3497,6 +3644,14 @@
                           console.log('[AskUser] Question received:', msg);
                           showQuestionModal(msg);
                           // Don't forward this custom message to React
+                          continue;
+                        }
+                        if (msg.type === 'compacting') {
+                          console.log('[Compacting] Status:', msg.status);
+                          if (window.__compactingIndicator) {
+                            if (msg.status === 'start') window.__compactingIndicator.show();
+                            else window.__compactingIndicator.hide();
+                          }
                           continue;
                         }
                       } catch(e) {}
@@ -3601,6 +3756,8 @@
                           }
                         } catch(te) {}
                       }
+                      // Reset gap detector on every forwarded message
+                      if (window.__compactingIndicator) window.__compactingIndicator.onStreamMessage();
                       // Forward all other lines to React
                       controller.enqueue(new TextEncoder().encode(line + '\n'));
                     }

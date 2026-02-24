@@ -2280,6 +2280,8 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       }
     }
 
+    let stderrCompactSignal = false;
+
     for await (const sdkMessage of query({
       prompt: streamingPrompt(),
       options: {
@@ -2287,7 +2289,13 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
         pathToClaudeCodeExecutable: cliPath,
         permissionMode: "bypassPermissions",
         env: { ...process.env, CLAUDECODE: "" },
-        stderr: (data) => { logger.chat.error("CLI stderr: " + data); },
+        stderr: (data) => {
+          logger.chat.error("CLI stderr: " + data);
+          // Detect compacting from CLI stderr and forward as stream event
+          if (typeof data === 'string' && /compact/i.test(data)) {
+            stderrCompactSignal = true;
+          }
+        },
         ...sessionId ? { resume: sessionId } : {},
         ...workingDirectory ? { cwd: workingDirectory } : {},
         allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
@@ -2297,6 +2305,15 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
       }
     })) {
       logger.chat.debug("Claude SDK Message: {sdkMessage}", { sdkMessage });
+      // Forward compacting signal detected from stderr
+      if (stderrCompactSignal) {
+        stderrCompactSignal = false;
+        yield { type: "compacting", status: "start" };
+      }
+      // When a new assistant message arrives after compacting, signal end
+      if (sdkMessage && sdkMessage.type === "assistant") {
+        yield { type: "compacting", status: "end" };
+      }
       yield {
         type: "claude_json",
         data: sdkMessage
