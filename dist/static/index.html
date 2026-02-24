@@ -2867,10 +2867,10 @@
         // Read-only tools that are safe to repeat — skip loop detection for these
         var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0, ExitPlanMode:1, EnterPlanMode:1, TodoWrite:1 };
 
-        // Commands that should never be retried — abort after just 2 attempts
-        // These are network/auth-dependent and retrying won't fix the issue
+        // Commands that should not be retried many times — abort after 3 attempts
+        // These are network/auth-dependent and retrying rarely fixes the issue
         var NEVER_RETRY_CMDS = /\b(git\s+push|git\s+pull|git\s+fetch|npm\s+publish|docker\s+push)\b/;
-        var NEVER_RETRY_THRESHOLD = 2;
+        var NEVER_RETRY_THRESHOLD = 3;
         var neverRetryCount = {};
 
         window.__loopDetector = {
