@@ -2301,7 +2301,7 @@ async function* executeClaudeCommand(message, requestId, requestAbortControllers
         allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
         disallowedTools: ["AskUserQuestion"],
         mcpServers: { "ask-user-webui": askUserMcp },
-        appendSystemPrompt: "IMPORTANT: When you need to ask the user a question with options, use the mcp__ask-user-webui__AskUserQuestion tool. This is the correct tool for asking user questions in this web interface."
+        appendSystemPrompt: "IMPORTANT: When you need to ask the user a question with options, use the mcp__ask-user-webui__AskUserQuestion tool. This is the correct tool for asking user questions in this web interface.\n\nIMPORTANT: If a git commit or push fails due to missing user.name or user.email configuration (e.g. 'Please tell me who you are'), DO NOT retry - instead ask the user for their name and email using AskUserQuestion, then run 'git config user.name' and 'git config user.email' (without --global) before retrying. If git push fails for authentication reasons, ask the user how they want to proceed rather than retrying."
       }
     })) {
       logger.chat.debug("Claude SDK Message: {sdkMessage}", { sdkMessage });

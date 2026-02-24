@@ -2817,6 +2817,20 @@
           return sig;
         }
 
+        // Coarse signature: extracts the base command for Bash (e.g., "git commit", "npm install")
+        // so repeated attempts with different args (like different commit messages) are caught
+        function getCoarseSignature(block) {
+          if (block.name !== 'Bash' || !block.input || !block.input.command) return null;
+          var cmd = block.input.command.trim();
+          // Strip leading cd ... && to get the actual command
+          cmd = cmd.replace(/^(?:cd\s+[^\s&]+\s*&&\s*)+/, '');
+          // Extract the base command (first 1-2 words, e.g., "git commit", "npm install", "docker build")
+          var m = cmd.match(/^(\w[\w.-]*(?:\s+\w[\w.-]*)?)/);
+          return m ? 'Bash::' + m[1] : 'Bash';
+        }
+
+        var recentCoarseCalls = [];
+
         function abortCurrentRequest() {
           // Find the current requestId from the fetch interceptor
           var reqId = window.__currentRequestId;
@@ -2864,7 +2878,15 @@
             if (!sig) return;
             recentCalls.push(sig);
             if (recentCalls.length > MAX_HISTORY) recentCalls.shift();
-            // Check 1: same tool repeated consecutively (A-A-A)
+
+            // Track coarse signatures (e.g., "git commit" regardless of message)
+            var coarseSig = getCoarseSignature(block);
+            if (coarseSig) {
+              recentCoarseCalls.push(coarseSig);
+              if (recentCoarseCalls.length > MAX_HISTORY) recentCoarseCalls.shift();
+            }
+
+            // Check 1: same tool repeated consecutively (A-A-A) — exact match
             if (recentCalls.length >= TOOL_LOOP_THRESHOLD) {
               var last = recentCalls[recentCalls.length - 1];
               var repeats = 0;
@@ -2878,7 +2900,23 @@
                 return;
               }
             }
-            // Check 2: repeating cycle pattern (A-B-A-B or A-B-C-A-B-C)
+
+            // Check 2: same BASE command repeated with different args (e.g., git commit with different messages)
+            if (coarseSig && recentCoarseCalls.length >= TOOL_LOOP_THRESHOLD) {
+              var lastCoarse = recentCoarseCalls[recentCoarseCalls.length - 1];
+              var coarseRepeats = 0;
+              for (var ci = recentCoarseCalls.length - 1; ci >= 0; ci--) {
+                if (recentCoarseCalls[ci] === lastCoarse) coarseRepeats++;
+                else break;
+              }
+              if (coarseRepeats >= TOOL_LOOP_THRESHOLD) {
+                var cmdName = lastCoarse.replace('Bash::', '');
+                showWarning('"' + cmdName + '" attempted ' + coarseRepeats + ' times with different args (likely failing)', true);
+                return;
+              }
+            }
+
+            // Check 3: repeating cycle pattern (A-B-A-B or A-B-C-A-B-C)
             if (recentCalls.length >= 4) {
               for (var pLen = 2; pLen <= 3; pLen++) {
                 if (recentCalls.length >= pLen * TOOL_LOOP_THRESHOLD) {
@@ -2926,6 +2964,7 @@
           // Reset when user sends a new message (fresh conversation turn)
           reset: function() {
             recentCalls = [];
+            recentCoarseCalls = [];
             emptyAssistantCount = 0;
             currentTurnHasContent = false;
           }
