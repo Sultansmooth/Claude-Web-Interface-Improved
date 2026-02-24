@@ -2867,11 +2867,13 @@
         // Read-only tools that are safe to repeat — skip loop detection for these
         var SAFE_TOOLS = { Read:1, Grep:1, Glob:1, WebFetch:1, WebSearch:1, Task:1, NotebookEdit:0, ExitPlanMode:1, EnterPlanMode:1, TodoWrite:1 };
 
-        // Commands that should not be retried many times — abort after 3 attempts
+        // Commands that should not be retried many times — abort after 3 CONSECUTIVE attempts
         // These are network/auth-dependent and retrying rarely fixes the issue
+        // Counter resets when a different command runs in between (corrective action)
         var NEVER_RETRY_CMDS = /\b(git\s+push|git\s+pull|git\s+fetch|npm\s+publish|docker\s+push)\b/;
         var NEVER_RETRY_THRESHOLD = 3;
-        var neverRetryCount = {};
+        var lastNeverRetryKey = null;
+        var consecutiveNeverRetryCount = 0;
 
         window.__loopDetector = {
           // Called for each tool_use block in assistant messages
@@ -2881,18 +2883,32 @@
             // Skip read-only tools — repeating them is normal and harmless
             if (block.name && SAFE_TOOLS[block.name]) return;
 
-            // Check 0: never-retry commands (git push, etc.) — abort after just 2 attempts
+            // Check 0: never-retry commands (git push, etc.) — abort after 3 CONSECUTIVE attempts
+            // If a different command runs in between, the counter resets (Claude took corrective action)
             if (block.name === 'Bash' && block.input && block.input.command) {
               var rawCmd = block.input.command.replace(/^(?:cd\s+[^\s&]+\s*&&\s*)+/, '').trim();
               var nrMatch = rawCmd.match(NEVER_RETRY_CMDS);
               if (nrMatch) {
                 var nrKey = nrMatch[1].replace(/\s+/g, ' ');
-                neverRetryCount[nrKey] = (neverRetryCount[nrKey] || 0) + 1;
-                if (neverRetryCount[nrKey] >= NEVER_RETRY_THRESHOLD) {
-                  showWarning('"' + nrKey + '" failed ' + neverRetryCount[nrKey] + ' times — likely an auth/network issue, ask user', true);
+                if (nrKey === lastNeverRetryKey) {
+                  consecutiveNeverRetryCount++;
+                } else {
+                  lastNeverRetryKey = nrKey;
+                  consecutiveNeverRetryCount = 1;
+                }
+                if (consecutiveNeverRetryCount >= NEVER_RETRY_THRESHOLD) {
+                  showWarning('"' + nrKey + '" failed ' + consecutiveNeverRetryCount + ' times consecutively — likely an auth/network issue', true);
                   return;
                 }
+              } else {
+                // Different command ran — reset the consecutive counter
+                lastNeverRetryKey = null;
+                consecutiveNeverRetryCount = 0;
               }
+            } else {
+              // Non-Bash tool — also resets the consecutive counter
+              lastNeverRetryKey = null;
+              consecutiveNeverRetryCount = 0;
             }
 
             var sig = getSignature(block);
@@ -2986,7 +3002,8 @@
           reset: function() {
             recentCalls = [];
             recentCoarseCalls = [];
-            neverRetryCount = {};
+            lastNeverRetryKey = null;
+            consecutiveNeverRetryCount = 0;
             emptyAssistantCount = 0;
             currentTurnHasContent = false;
           }
