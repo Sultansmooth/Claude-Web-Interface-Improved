@@ -2477,24 +2477,23 @@
         function isDark() { return document.documentElement.classList.contains('dark'); }
 
         function injectHistoryRenames() {
-          if (window.location.search.indexOf('view=history') === -1) return;
+          var onHistoryPage = window.location.search.indexOf('view=history') !== -1;
+          if (!onHistoryPage) return;
 
-          // Find ANY element containing "Session: xxxxxxxx" text
-          // Use a broad selector since React may use h3, p, span, or div
-          var allEls = document.querySelectorAll('h3, p, span, div');
+          // Find elements whose textContent contains "Session: xxxxxxxx"
+          // React splits text into multiple text nodes, so we must check the element's combined textContent
+          // Use the truncate class as a hint — React uses h3.truncate for session titles
           var dark = isDark();
           var titles = getTitles();
+          var candidates = document.querySelectorAll('.truncate, h3, [class*="font-medium"]');
           var sessionPs = [];
-          for (var j = 0; j < allEls.length; j++) {
-            var el = allEls[j];
-            // Only match elements whose DIRECT text starts with Session:
-            // (avoid matching parent containers)
-            var directText = '';
-            for (var cn = 0; cn < el.childNodes.length; cn++) {
-              if (el.childNodes[cn].nodeType === 3) directText += el.childNodes[cn].textContent;
+          for (var j = 0; j < candidates.length; j++) {
+            var el = candidates[j];
+            if (el.getAttribute('data-history-rename')) continue;
+            var tc = (el.textContent || '').trim();
+            if (tc.match(/^Session:\s*[a-f0-9]{8}/)) {
+              sessionPs.push(el);
             }
-            if (!directText && el.children.length === 0) directText = el.textContent || '';
-            if (directText.trim().match(/^Session:\s*[a-f0-9]{8}/)) sessionPs.push(el);
           }
 
           for (var i = 0; i < sessionPs.length; i++) {
