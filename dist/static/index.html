@@ -2479,13 +2479,9 @@
         function injectHistoryRenames() {
           if (window.location.search.indexOf('view=history') === -1) return;
 
-          // React renders each session card as:
-          //   <div onClick=...>
-          //     <p class="text-sm font-medium ...">Session: a1b2c3d4...</p>
-          //     <p class="text-xs ...">Started: ... | Last: ...</p>
-          //   </div>
-          // Find the "Session: xxxxxxxx..." paragraphs
-          var sessionPs = document.querySelectorAll('p.text-sm');
+          // React renders each session card with h3.text-sm or p.text-sm
+          // containing "Session: a1b2c3d4..."
+          var sessionPs = document.querySelectorAll('h3.text-sm, p.text-sm, span.text-xs');
           var dark = isDark();
           var titles = getTitles();
 
@@ -2504,7 +2500,7 @@
             var badge = document.createElement('span');
             badge.className = 'history-rename-badge';
             badge.setAttribute('data-sid', shortId);
-            badge.style.cssText = 'display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:4px;margin-right:8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;cursor:pointer;' +
+            badge.style.cssText = 'display:block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;margin-bottom:4px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;' +
               (dark
                 ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;'
                 : 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;');
