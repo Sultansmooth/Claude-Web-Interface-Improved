@@ -1291,6 +1291,9 @@
         function setAutoScroll(v) { localStorage.setItem(AUTOSCROLL_KEY, v ? '1' : '0'); }
         function isNotifyEnabled() { return localStorage.getItem(NOTIFY_KEY) === '1'; }
         function setNotifyEnabled(v) { localStorage.setItem(NOTIFY_KEY, v ? '1' : '0'); }
+        var LOOP_ABORT_KEY = 'claude-webui-loop-abort';
+        function isLoopAbortEnabled() { return localStorage.getItem(LOOP_ABORT_KEY) !== '0'; }
+        function setLoopAbortEnabled(v) { localStorage.setItem(LOOP_ABORT_KEY, v ? '1' : '0'); }
 
         // Notification sound using Web Audio API
         function playNotifySound() {
@@ -1634,6 +1637,21 @@
             render();
           };
           toolbar.appendChild(notifyBtn);
+
+          // Loop auto-abort toggle
+          var loopAbortOn = isLoopAbortEnabled();
+          var loopBtn = document.createElement('button');
+          loopBtn.innerHTML = loopAbortOn ? '&#x1F6D1;' : '&#x27B0;';
+          loopBtn.title = loopAbortOn ? 'Loop auto-abort ON (click to disable)' : 'Loop auto-abort OFF (click to enable)';
+          loopBtn.style.cssText = 'width:36px;height:36px;border:none;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;background:transparent;' +
+            (loopAbortOn ? 'opacity:1;' : 'opacity:0.5;');
+          loopBtn.onmouseenter = function() { loopBtn.style.background = dark ? '#1e293b' : '#e2e8f0'; };
+          loopBtn.onmouseleave = function() { loopBtn.style.background = 'transparent'; };
+          loopBtn.onclick = function() {
+            setLoopAbortEnabled(!loopAbortOn);
+            render();
+          };
+          toolbar.appendChild(loopBtn);
 
           // Job Queue toggle button
           var queueBtn = document.createElement('button');
@@ -2840,7 +2858,8 @@
 
         function showWarning(reason, autoAbort) {
           if (warningEl) return;
-          if (autoAbort) abortCurrentRequest();
+          var shouldAbort = autoAbort && isLoopAbortEnabled();
+          if (shouldAbort) abortCurrentRequest();
           warningEl = document.createElement('div');
           warningEl.id = 'loop-warning';
           var dark = document.documentElement.classList.contains('dark');
@@ -2848,7 +2867,7 @@
             (dark ? 'color:#fbbf24;background:rgba(30,30,20,0.97);border:1px solid #854d0e;' : 'color:#92400e;background:rgba(255,251,235,0.97);border:1px solid #f59e0b;');
           warningEl.innerHTML =
             '<span style="font-size:18px;">&#9888;</span>' +
-            '<div><strong>Loop detected' + (autoAbort ? ' — auto-stopped' : '') + '</strong><br><span style="font-size:12px;opacity:0.8;">' + reason.replace(/</g, '&lt;') + '</span></div>' +
+            '<div><strong>Loop detected' + (shouldAbort ? ' — auto-stopped' : (autoAbort ? ' — auto-stop disabled' : '')) + '</strong><br><span style="font-size:12px;opacity:0.8;">' + reason.replace(/</g, '&lt;') + '</span></div>' +
             '<button id="loop-dismiss" style="margin-left:auto;padding:4px 12px;border-radius:6px;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer;font-size:12px;flex-shrink:0;">OK</button>';
           document.body.appendChild(warningEl);
           document.getElementById('loop-dismiss').addEventListener('click', function() {
