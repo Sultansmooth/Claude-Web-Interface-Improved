@@ -2467,6 +2467,45 @@ function createApp(runtime2, config) {
     (c) => handleAbortRequest(c, requestAbortControllers)
   );
   app.post("/api/chat", (c) => handleChatRequest(c, requestAbortControllers));
+
+  // Session titles — server-side storage
+  app.get("/api/titles", async (c) => {
+    try {
+      const homeDir = getHomeDir();
+      const titlesPath = `${homeDir}/.claude/session-titles.json`;
+      if (await exists(titlesPath)) {
+        const data = await readTextFile(titlesPath);
+        return c.json(JSON.parse(data));
+      }
+      return c.json({});
+    } catch (e) {
+      return c.json({});
+    }
+  });
+  app.post("/api/titles", async (c) => {
+    try {
+      const homeDir = getHomeDir();
+      const titlesPath = `${homeDir}/.claude/session-titles.json`;
+      const body = await c.req.json();
+      const { sessionId, title } = body;
+      if (!sessionId) return c.json({ error: "sessionId required" }, 400);
+      let titles = {};
+      if (await exists(titlesPath)) {
+        try { titles = JSON.parse(await readTextFile(titlesPath)); } catch(e) {}
+      }
+      if (title) {
+        titles[sessionId] = title;
+      } else {
+        delete titles[sessionId];
+      }
+      await writeTextFile(titlesPath, JSON.stringify(titles, null, 2));
+      return c.json({ ok: true });
+    } catch (e) {
+      logger.api.error("Failed to save title: {e}", { e });
+      return c.json({ error: "Failed to save" }, 500);
+    }
+  });
+
   // Fork session endpoint — copies session file with new UUID, returns new session ID
   app.post("/api/fork", async (c) => {
     try {

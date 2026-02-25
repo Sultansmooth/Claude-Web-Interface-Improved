@@ -669,6 +669,12 @@
           var t = getTitles();
           if (title) t[sessionId] = title; else delete t[sessionId];
           localStorage.setItem(TITLES_KEY, JSON.stringify(t));
+          // Also persist to server
+          fetch('/api/titles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sessionId, title: title || '' })
+          }).catch(function() {});
         }
 
         function getSessionId() {
@@ -2461,104 +2467,136 @@
       })();
     </script>
 
-    <!-- History view: session renaming -->
+    <!-- History view: session renaming (MutationObserver + server-side storage) -->
     <script>
       (function() {
         var TITLES_KEY = 'claude-webui-session-titles';
-        function getTitles() {
-          try { return JSON.parse(localStorage.getItem(TITLES_KEY)) || {}; }
-          catch(e) { return {}; }
+        var serverTitles = null; // cached from server
+
+        function getLocalTitles() {
+          try { return JSON.parse(localStorage.getItem(TITLES_KEY)) || {}; } catch(e) { return {}; }
+        }
+        function getMergedTitles() {
+          var local = getLocalTitles();
+          if (serverTitles) {
+            for (var k in serverTitles) { if (!local[k]) local[k] = serverTitles[k]; }
+          }
+          return local;
         }
         function saveTitle(id, title) {
-          var t = getTitles();
+          var t = getLocalTitles();
           if (title) t[id] = title; else delete t[id];
           localStorage.setItem(TITLES_KEY, JSON.stringify(t));
+          fetch('/api/titles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: id, title: title || '' })
+          }).catch(function() {});
         }
         function isDark() { return document.documentElement.classList.contains('dark'); }
 
-        function injectHistoryRenames() {
-          var onHistoryPage = window.location.search.indexOf('view=history') !== -1;
-          if (!onHistoryPage) return;
+        // Fetch server titles once when entering history view
+        function loadServerTitles(cb) {
+          if (serverTitles !== null) { cb(); return; }
+          fetch('/api/titles').then(function(r) { return r.json(); }).then(function(data) {
+            serverTitles = data || {};
+            cb();
+          }).catch(function() { serverTitles = {}; cb(); });
+        }
 
-          // Find elements whose textContent contains "Session: xxxxxxxx"
-          // React splits text into multiple text nodes, so we must check the element's combined textContent
-          // Use the truncate class as a hint — React uses h3.truncate for session titles
+        function processSessionCard(el) {
+          if (el.getAttribute('data-history-rename')) return;
+          var tc = (el.textContent || '').trim();
+          var match = tc.match(/^Session:\s*([a-f0-9]{8})/);
+          if (!match) return;
+
+          el.setAttribute('data-history-rename', '1');
+          var shortId = match[1];
+          var titles = getMergedTitles();
+          var customName = titles[shortId] || '';
           var dark = isDark();
-          var titles = getTitles();
-          var candidates = document.querySelectorAll('.truncate, h3, [class*="font-medium"]');
-          var sessionPs = [];
-          for (var j = 0; j < candidates.length; j++) {
-            var el = candidates[j];
-            if (el.getAttribute('data-history-rename')) continue;
-            var tc = (el.textContent || '').trim();
-            if (tc.match(/^Session:\s*[a-f0-9]{8}/)) {
-              sessionPs.push(el);
-            }
+
+          var badge = document.createElement('span');
+          badge.className = 'history-rename-badge';
+          badge.setAttribute('data-sid', shortId);
+          badge.style.cssText = 'display:block;font-size:12px;font-weight:600;padding:2px 10px;border-radius:4px;margin-bottom:2px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;' +
+            (dark
+              ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;'
+              : 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;');
+          badge.textContent = customName || 'name';
+          badge.title = customName
+            ? customName + ' (' + shortId + ') \u2014 click to rename'
+            : 'Click to name this session';
+
+          if (!customName) {
+            badge.style.fontStyle = 'italic';
+            badge.style.opacity = '0.5';
           }
 
-          for (var i = 0; i < sessionPs.length; i++) {
-            var p = sessionPs[i];
-            var text = (p.textContent || '').trim();
-            var match = text.match(/Session:\s*([a-f0-9]{8})/);
-            if (!match) continue;
-            if (p.getAttribute('data-history-rename')) continue;
-            p.setAttribute('data-history-rename', '1');
+          (function(sid, bdg) {
+            bdg.addEventListener('click', function(e) {
+              e.stopPropagation();
+              e.preventDefault();
+              var current = getMergedTitles()[sid] || '';
+              var newName = prompt('Name this session (leave blank to clear):', current);
+              if (newName === null) return;
+              newName = newName.trim();
+              saveTitle(sid, newName);
+              bdg.textContent = newName || 'name';
+              bdg.style.fontStyle = newName ? 'normal' : 'italic';
+              bdg.style.opacity = newName ? '1' : '0.5';
+              bdg.title = newName
+                ? newName + ' (' + sid + ') \u2014 click to rename'
+                : 'Click to name this session';
+            });
+          })(shortId, badge);
 
-            var shortId = match[1];
-            var customName = titles[shortId] || '';
+          el.insertBefore(badge, el.firstChild);
+        }
 
-            // Add a name badge before the "Session:" text
-            var badge = document.createElement('span');
-            badge.className = 'history-rename-badge';
-            badge.setAttribute('data-sid', shortId);
-            badge.style.cssText = 'display:block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;margin-bottom:4px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;' +
-              (dark
-                ? 'background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;'
-                : 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;');
-            badge.textContent = customName || 'rename';
-            badge.title = customName
-              ? customName + ' (' + shortId + ') \u2014 click to rename'
-              : 'Click to name this session';
-
-            // Style the badge differently if it has a name vs default
-            if (customName) {
-              badge.style.fontStyle = 'normal';
-            } else {
-              badge.style.fontStyle = 'italic';
-              badge.style.opacity = '0.7';
-            }
-
-            // Click to rename (stop propagation so card click doesn't navigate)
-            (function(sid, bdg, pEl) {
-              bdg.addEventListener('click', function(e) {
-                e.stopPropagation();
-                e.preventDefault();
-                var t = getTitles();
-                var current = t[sid] || '';
-                var newName = prompt('Name this session (leave blank to clear):', current);
-                if (newName === null) return;
-                newName = newName.trim();
-                saveTitle(sid, newName);
-                bdg.textContent = newName || 'rename';
-                if (newName) {
-                  bdg.style.fontStyle = 'normal';
-                  bdg.style.opacity = '1';
-                  bdg.title = newName + ' (' + sid + ') \u2014 click to rename';
-                } else {
-                  bdg.style.fontStyle = 'italic';
-                  bdg.style.opacity = '0.7';
-                  bdg.title = 'Click to name this session';
-                }
-              });
-            })(shortId, badge, p);
-
-            // Insert badge before the text content
-            p.insertBefore(badge, p.firstChild);
+        function scanForSessionCards(root) {
+          // Look for h3.truncate elements (React's session card titles)
+          var els = (root || document).querySelectorAll('h3.truncate, h3[class*="font-medium"], p[class*="font-medium"], [class*="font-mono"][class*="text-sm"]');
+          for (var i = 0; i < els.length; i++) {
+            processSessionCard(els[i]);
           }
         }
 
-        // Poll when on history view
-        setInterval(injectHistoryRenames, 500);
+        // MutationObserver — only fires when DOM actually changes
+        var observer = null;
+        var lastUrl = '';
+
+        function checkAndObserve() {
+          var url = window.location.search;
+          var isHistory = url.indexOf('view=history') !== -1;
+
+          if (isHistory && lastUrl !== url) {
+            lastUrl = url;
+            serverTitles = null; // re-fetch on navigation
+            loadServerTitles(function() { scanForSessionCards(); });
+          }
+
+          if (isHistory && !observer) {
+            observer = new MutationObserver(function(mutations) {
+              var needsScan = false;
+              for (var m = 0; m < mutations.length; m++) {
+                if (mutations[m].addedNodes.length > 0) { needsScan = true; break; }
+              }
+              if (needsScan) scanForSessionCards();
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            scanForSessionCards();
+          } else if (!isHistory && observer) {
+            observer.disconnect();
+            observer = null;
+            lastUrl = '';
+          }
+        }
+
+        // Check on popstate (back/forward) and periodically for SPA route changes
+        window.addEventListener('popstate', checkAndObserve);
+        // Light check every 1s just for SPA route detection (no DOM scanning)
+        setInterval(checkAndObserve, 1000);
       })();
     </script>
 
