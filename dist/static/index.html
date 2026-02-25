@@ -2479,16 +2479,28 @@
         function injectHistoryRenames() {
           if (window.location.search.indexOf('view=history') === -1) return;
 
-          // React renders each session card with h3.text-sm or p.text-sm
-          // containing "Session: a1b2c3d4..."
-          var sessionPs = document.querySelectorAll('h3.text-sm, p.text-sm, span.text-xs');
+          // Find ANY element containing "Session: xxxxxxxx" text
+          // Use a broad selector since React may use h3, p, span, or div
+          var allEls = document.querySelectorAll('h3, p, span, div');
           var dark = isDark();
           var titles = getTitles();
+          var sessionPs = [];
+          for (var j = 0; j < allEls.length; j++) {
+            var el = allEls[j];
+            // Only match elements whose DIRECT text starts with Session:
+            // (avoid matching parent containers)
+            var directText = '';
+            for (var cn = 0; cn < el.childNodes.length; cn++) {
+              if (el.childNodes[cn].nodeType === 3) directText += el.childNodes[cn].textContent;
+            }
+            if (!directText && el.children.length === 0) directText = el.textContent || '';
+            if (directText.trim().match(/^Session:\s*[a-f0-9]{8}/)) sessionPs.push(el);
+          }
 
           for (var i = 0; i < sessionPs.length; i++) {
             var p = sessionPs[i];
             var text = (p.textContent || '').trim();
-            var match = text.match(/^Session:\s*([a-f0-9]{8})/);
+            var match = text.match(/Session:\s*([a-f0-9]{8})/);
             if (!match) continue;
             if (p.getAttribute('data-history-rename')) continue;
             p.setAttribute('data-history-rename', '1');
